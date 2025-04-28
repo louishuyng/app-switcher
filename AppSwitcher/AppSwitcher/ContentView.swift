@@ -123,6 +123,8 @@ struct ContentView: View {
     @StateObject private var navigationManager = AppNavigationManager()
     @State private var isScrolling = false
     @State private var outsideClickMonitor: Any? = nil
+    @State private var keyDownMonitor: Any? = nil
+    @State private var isImagePickerActive = false
     
     var filteredApps: [AppInfo] {
         if searchModel.searchText.isEmpty { return apps }
@@ -188,6 +190,7 @@ struct ContentView: View {
         .edgesIgnoringSafeArea(.all)
         .background(
             KeyEventHandlingView { event in
+                // Only handle arrow keys and return key, other keys will close the app
                 switch Int(event.keyCode) {
                 case kVK_UpArrow:
                     navigationManager.moveUp()
@@ -201,7 +204,8 @@ struct ContentView: View {
                     }
                     return true
                 default:
-                    return false
+                    closeSwitcher()
+                    return true
                 }
             }
         )
@@ -216,7 +220,6 @@ struct ContentView: View {
             // Register for image change notification
             NotificationCenter.default.addObserver(forName: .imageChanged, object: nil, queue: .main) { _ in
                 if let data = UserDefaults.standard.data(forKey: "leftImage") {
-                    // Create a new NSImage from the data
                     let newImage = NSImage(data: data)
                     if newImage != nil {
                         self.selectedImage = newImage
@@ -224,14 +227,34 @@ struct ContentView: View {
                     }
                 }
             }
+            
             // Add global monitor for mouse down events
             outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
                 if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
                     let mouseLocation = NSEvent.mouseLocation
                     let windowFrame = window.frame
-                    if !windowFrame.contains(mouseLocation) {
-                        closeSwitcher()
+                    
+                    // Only close if clicking on another app's window and neither settings nor image picker is active
+                    if !windowFrame.contains(mouseLocation) && !isImagePickerActive && !showingSettings {
+                        // Get the window under the mouse
+                        let windowNumber = NSWindow.windowNumber(at: mouseLocation, belowWindowWithWindowNumber: 0)
+                        // If there's a window under the mouse (not desktop), close the switcher
+                        if windowNumber != 0 {
+                            closeSwitcher()
+                        }
                     }
+                }
+            }
+            
+            // Add global monitor for key down events
+            keyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+                // Check if the key combination matches the current hotkey
+                let currentModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                let expectedModifiers = HotkeyManager.shared.expectedModifierFlags(for: hotkey)
+                let keyMatch = event.keyCode == HotkeyManager.shared.keyCode(for: hotkey.key)
+                
+                if !(currentModifiers == expectedModifiers && keyMatch) {
+                    closeSwitcher()
                 }
             }
         }
@@ -243,6 +266,12 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $selectedImage, isPresented: $showingImagePicker)
+                .onAppear {
+                    isImagePickerActive = true
+                }
+                .onDisappear {
+                    isImagePickerActive = false
+                }
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView(selectedImage: $selectedImage, hotkey: $hotkey)
@@ -252,6 +281,10 @@ struct ContentView: View {
             if let monitor = outsideClickMonitor {
                 NSEvent.removeMonitor(monitor)
                 outsideClickMonitor = nil
+            }
+            if let monitor = keyDownMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyDownMonitor = nil
             }
         }
     }
@@ -850,6 +883,8 @@ class HotkeyManager {
     private var monitor: Any?
     private var callback: (() -> Void)?
     private var currentHotkey: Hotkey?
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
     
     func setHotkey(_ hotkey: Hotkey, action: @escaping () -> Void) {
         // Remove existing monitor if any
@@ -858,33 +893,75 @@ class HotkeyManager {
             self.monitor = nil
         }
         
+        // Remove existing event tap if any
+        if let eventTap = eventTap {
+            CFRunLoopSourceInvalidate(runLoopSource)
+            CFMachPortInvalidate(eventTap)
+            self.eventTap = nil
+            self.runLoopSource = nil
+        }
+        
         // Store the current hotkey and callback
         currentHotkey = hotkey
         callback = action
         
         // Create a new monitor for the hotkey
         monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self, let currentHotkey = self.currentHotkey else { return }
-            
-            // Get the exact modifier flags we expect
-            let expectedModifiers = self.expectedModifierFlags(for: currentHotkey)
-            
-            // Check if the event's modifiers exactly match what we expect
-            let modifiersMatch = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == expectedModifiers
-            
-            if modifiersMatch {
-                // Only then check the key code
-                let keyMatch = event.keyCode == self.keyCode(for: currentHotkey.key)
-                if keyMatch {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.callback?()
-                    }
+            self?.handleKeyEvent(event)
+        }
+        
+        // Set up event tap for more reliable global hotkey detection
+        setupEventTap()
+    }
+    
+    private func setupEventTap() {
+        // Create event tap
+        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                let hotkeyManager = Unmanaged<HotkeyManager>.fromOpaque(refcon!).takeUnretainedValue()
+                if let nsEvent = NSEvent(cgEvent: event) {
+                    hotkeyManager.handleKeyEvent(nsEvent)
+                }
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+        
+        if let eventTap = eventTap {
+            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+            if let runLoopSource = runLoopSource {
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+                CGEvent.tapEnable(tap: eventTap, enable: true)
+            }
+        }
+    }
+    
+    private func handleKeyEvent(_ event: NSEvent) {
+        guard let currentHotkey = self.currentHotkey else { return }
+        
+        // Get the exact modifier flags we expect
+        let expectedModifiers = self.expectedModifierFlags(for: currentHotkey)
+        
+        // Check if the event's modifiers exactly match what we expect
+        let modifiersMatch = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == expectedModifiers
+        
+        if modifiersMatch {
+            // Only then check the key code
+            let keyMatch = event.keyCode == self.keyCode(for: currentHotkey.key)
+            if keyMatch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.callback?()
                 }
             }
         }
     }
     
-    private func expectedModifierFlags(for hotkey: Hotkey) -> NSEvent.ModifierFlags {
+    func expectedModifierFlags(for hotkey: Hotkey) -> NSEvent.ModifierFlags {
         var flags: NSEvent.ModifierFlags = []
         
         for modifier in hotkey.modifiers {
@@ -900,7 +977,7 @@ class HotkeyManager {
         return flags
     }
     
-    private func keyCode(for key: String) -> UInt16 {
+    func keyCode(for key: String) -> UInt16 {
         switch key.lowercased() {
         case "space": return 49
         case ",": return 43
