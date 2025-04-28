@@ -158,15 +158,6 @@ class DraggableWindow: NSWindow {
         initialLocation = nil
         super.mouseUp(with: event)
     }
-    
-    override func keyDown(with event: NSEvent) {
-        // Forward key events to the first responder
-        if let firstResponder = self.firstResponder {
-            firstResponder.keyDown(with: event)
-        } else {
-            super.keyDown(with: event)
-        }
-    }
 }
 
 extension NSWindow {

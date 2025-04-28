@@ -47,6 +47,12 @@ struct Hotkey: Codable, Equatable {
     }
 }
 
+// MARK: - SearchModel
+class SearchModel: ObservableObject {
+    @Published var searchText: String = ""
+    @Published var searchFieldFocused: Bool = false
+}
+
 // MARK: - ContentView
 struct ContentView: View {
     @State private var selectedImage: NSImage? = UserDefaults.standard.data(forKey: "leftImage").flatMap { NSImage(data: $0) } ?? NSImage(named: "NSPhoto")
@@ -62,11 +68,10 @@ struct ContentView: View {
             return .default
         }
     }()
-    @State private var searchText: String = ""
-    @State private var searchFieldFocused: Bool = false
+    @StateObject private var searchModel = SearchModel()
     var filteredApps: [AppInfo] {
-        if searchText.isEmpty { return apps }
-        return apps.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        if searchModel.searchText.isEmpty { return apps }
+        return apps.filter { $0.name.localizedCaseInsensitiveContains(searchModel.searchText) }
     }
     // Helper view for app list
     private func appList(scrollProxy: ScrollViewProxy) -> some View {
@@ -115,7 +120,7 @@ struct ContentView: View {
                         .fill(Color(red: 0.13, green: 0.15, blue: 0.20, opacity: 0.92))
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
-                            SearchInput(text: $searchText, isFocused: $searchFieldFocused)
+                            SearchInput(text: $searchModel.searchText, isFocused: $searchModel.searchFieldFocused)
                                 .frame(height: 48)
                                 .padding(.top, 0)
                                 .padding(.leading, 16)
@@ -144,7 +149,7 @@ struct ContentView: View {
         .edgesIgnoringSafeArea(.all)
         .onAppear {
             apps = getInstalledApps()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { searchFieldFocused = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { searchModel.searchFieldFocused = true }
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $selectedImage)
@@ -214,6 +219,11 @@ struct FocusableTextField: NSViewRepresentable {
         }
         if isFirstResponder, nsView.window?.firstResponder != nsView {
             nsView.becomeFirstResponder()
+            // Place cursor at the end
+            if let editor = nsView.currentEditor() {
+                let length = nsView.stringValue.count
+                editor.selectedRange = NSRange(location: length, length: 0)
+            }
         }
     }
 }
