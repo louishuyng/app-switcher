@@ -117,7 +117,7 @@ class AppNavigationManager: ObservableObject {
 // MARK: - AppDelegate
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Single instance behavior is now handled by AppSwitcherAppDelegate
+        // S  ingle instance behavior is now handled by AppSwitcherAppDelegate
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -145,6 +145,7 @@ struct ContentView: View {
     @State private var outsideClickMonitor: Any? = nil
     @State private var keyDownMonitor: Any? = nil
     @State private var isImagePickerActive = false
+    @State private var isWindowVisible = false
     
     var filteredApps: [AppInfo] {
         if searchModel.searchText.isEmpty { return apps }
@@ -228,6 +229,8 @@ struct ContentView: View {
                     return true
                 }
             }
+            .environment(\.isSettingsVisible, showingSettings)
+            .environment(\.isImagePickerActive, isImagePickerActive)
         )
         .onAppear {
             apps = getInstalledApps()
@@ -248,6 +251,21 @@ struct ContentView: View {
                 }
             }
             
+            // Register for key event notifications
+            NotificationCenter.default.addObserver(forName: .moveUp, object: nil, queue: .main) { _ in
+                navigationManager.moveUp()
+            }
+            
+            NotificationCenter.default.addObserver(forName: .moveDown, object: nil, queue: .main) { _ in
+                navigationManager.moveDown()
+            }
+            
+            NotificationCenter.default.addObserver(forName: .openSelectedApp, object: nil, queue: .main) { _ in
+                if let app = navigationManager.getSelectedApp() {
+                    openApp(app)
+                }
+            }
+            
             // Add global monitor for mouse down events
             outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
                 if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
@@ -258,18 +276,6 @@ struct ContentView: View {
                     if !windowFrame.contains(mouseLocation) && !isImagePickerActive && !showingSettings {
                         closeSwitcher()
                     }
-                }
-            }
-            
-            // Add global monitor for key down events
-            keyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
-                // Check if the key combination matches the current hotkey
-                let currentModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                let expectedModifiers = HotkeyManager.shared.expectedModifierFlags(for: hotkey)
-                let keyMatch = event.keyCode == HotkeyManager.shared.keyCode(for: hotkey.key)
-                
-                if !(currentModifiers == expectedModifiers && keyMatch) {
-                    closeSwitcher()
                 }
             }
         }
@@ -342,11 +348,20 @@ struct ContentView: View {
     }
     
     func closeSwitcher() {
-        NSApplication.shared.windows.forEach { window in
-            if window.styleMask.contains(.borderless) {
-                window.orderOut(nil)
-                HotkeyManager.shared.setSwitcherVisible(false)
+        // Use userInteractive QoS for UI updates
+        DispatchQueue.main.async(qos: .userInteractive) {
+            NSApplication.shared.windows.forEach { window in
+                if window.styleMask.contains(.borderless) {
+                    if window.isVisible {
+                        window.orderOut(nil)
+                    }
+                    HotkeyManager.shared.setSwitcherVisible(false)
+                    self.isWindowVisible = false
+                    // Clear the search input when hiding
+                    NotificationCenter.default.post(name: .clearSearch, object: nil)
+                }
             }
+            NSApp.hide(nil)
         }
     }
     
@@ -377,46 +392,101 @@ struct ContentView: View {
 // MARK: - KeyEventHandlingView
 struct KeyEventHandlingView: NSViewRepresentable {
     let onKeyDown: (NSEvent) -> Bool
+    @State private var isSettingsVisible = false
+    @State private var isImagePickerActive = false
     
     func makeNSView(context: Context) -> NSView {
         let view = KeyHandlingView()
         view.onKeyDown = onKeyDown
+        view.isSettingsVisible = isSettingsVisible
+        view.isImagePickerActive = isImagePickerActive
         return view
     }
     
     func updateNSView(_ nsView: NSView, context: Context) {
         if let view = nsView as? KeyHandlingView {
             view.onKeyDown = onKeyDown
+            view.isSettingsVisible = isSettingsVisible
+            view.isImagePickerActive = isImagePickerActive
         }
     }
     
     class KeyHandlingView: NSView {
         var onKeyDown: ((NSEvent) -> Bool)?
+        var isSettingsVisible: Bool = false
+        var isImagePickerActive: Bool = false
         
         override var acceptsFirstResponder: Bool { true }
         
         override func keyDown(with event: NSEvent) {
-            // Check if this is the hotkey combination
+            // If settings or image picker is active, don't handle the key event
+            if isSettingsVisible || isImagePickerActive {
+                super.keyDown(with: event)
+                return
+            }
+            
+            // 1. First check for hotkey combination
             let currentHotkey = HotkeyManager.shared.getCurrentHotkey()
             let expectedModifiers = HotkeyManager.shared.expectedModifierFlags(for: currentHotkey ?? .default)
             let modifiersMatch = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == expectedModifiers
             let keyMatch = event.keyCode == HotkeyManager.shared.keyCode(for: currentHotkey?.key ?? "space")
             
             if modifiersMatch && keyMatch {
-                // If it's the hotkey, consume the event completely
-                if onKeyDown?(event) == true {
-                    return
+                // Hotkey detected - toggle app visibility
+                if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
+                    if window.isVisible {
+                        window.orderOut(nil)
+                        HotkeyManager.shared.setSwitcherVisible(false)
+                        NotificationCenter.default.post(name: .clearSearch, object: nil)
+                    } else {
+                        window.makeKeyAndOrderFront(nil)
+                        HotkeyManager.shared.setSwitcherVisible(true)
+                        NotificationCenter.default.post(name: .clearSearch, object: nil)
+                    }
                 }
-            } else {
-                // For all other keys, pass them through
-                super.keyDown(with: event)
+                return
+            }
+            
+            // 2. Only handle other keys if the app is visible
+            if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }),
+               window.isVisible {
+                switch Int(event.keyCode) {
+                case kVK_DownArrow:
+                    // Move to next app in list
+                    NotificationCenter.default.post(name: .moveDown, object: nil)
+                    return
+                case kVK_UpArrow:
+                    // Move to previous app in list
+                    NotificationCenter.default.post(name: .moveUp, object: nil)
+                    return
+                case kVK_Return:
+                    // Open selected app
+                    NotificationCenter.default.post(name: .openSelectedApp, object: nil)
+                    return
+                default:
+                    // For all other keys, close the app
+                    window.orderOut(nil)
+                    HotkeyManager.shared.setSwitcherVisible(false)
+                    NotificationCenter.default.post(name: .clearSearch, object: nil)
+                }
             }
         }
         
         override func becomeFirstResponder() -> Bool {
             return true
         }
+        
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            return true
+        }
     }
+}
+
+// Add new notification names for key events
+extension Notification.Name {
+    static let moveUp = Notification.Name("moveUp")
+    static let moveDown = Notification.Name("moveDown")
+    static let openSelectedApp = Notification.Name("openSelectedApp")
 }
 
 // MARK: - FocusableTextField
@@ -688,6 +758,7 @@ struct SettingsView: View {
             .frame(minWidth: 700, minHeight: 500)
         }
         .onAppear {
+            HotkeyManager.shared.setSettingsVisible(true)
             accessibilityGranted = AXIsProcessTrusted()
             timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
                 let granted = AXIsProcessTrusted()
@@ -697,6 +768,7 @@ struct SettingsView: View {
             }
         }
         .onDisappear {
+            HotkeyManager.shared.setSettingsVisible(false)
             timer?.invalidate()
         }
         .sheet(isPresented: $showingImagePicker) {
@@ -850,57 +922,7 @@ struct HotkeyPickerOverlay: NSViewRepresentable {
         }
         
         func checkConflict(hotkey: Hotkey) -> String? {
-            // Check for empty keycodes
-            if hotkey.key.isEmpty || hotkey.key == "unknown" {
-                return "Invalid key detected"
-            }
-            
-            // Require at least one modifier
-            if hotkey.modifiers.isEmpty {
-                return "At least one modifier key (Command, Option, Control, or Shift) is required"
-            }
-            
-            // Check for system shortcuts
-            let systemShortcuts: [(hotkey: Hotkey, description: String)] = [
-                (Hotkey(key: "space", modifiers: ["command"]), "Spotlight"),
-                (Hotkey(key: "tab", modifiers: ["command"]), "App Switcher"),
-                (Hotkey(key: "w", modifiers: ["command"]), "Close Window"),
-                (Hotkey(key: "q", modifiers: ["command"]), "Quit Application"),
-                (Hotkey(key: "h", modifiers: ["command"]), "Hide Application"),
-                (Hotkey(key: "m", modifiers: ["command"]), "Minimize Window"),
-                (Hotkey(key: "c", modifiers: ["command"]), "Copy"),
-                (Hotkey(key: "v", modifiers: ["command"]), "Paste"),
-                (Hotkey(key: "x", modifiers: ["command"]), "Cut"),
-                (Hotkey(key: "a", modifiers: ["command"]), "Select All"),
-                (Hotkey(key: "z", modifiers: ["command"]), "Undo"),
-                (Hotkey(key: "z", modifiers: ["command", "shift"]), "Redo"),
-                (Hotkey(key: ",", modifiers: ["command"]), "Preferences"),
-                (Hotkey(key: "f", modifiers: ["command"]), "Find"),
-                (Hotkey(key: "g", modifiers: ["command"]), "Find Next"),
-                (Hotkey(key: "g", modifiers: ["command", "shift"]), "Find Previous"),
-                (Hotkey(key: "f", modifiers: ["command", "option"]), "Search in Spotlight"),
-                (Hotkey(key: "l", modifiers: ["command"]), "Go to Address Bar"),
-                (Hotkey(key: "r", modifiers: ["command"]), "Refresh"),
-                (Hotkey(key: "t", modifiers: ["command"]), "New Tab"),
-                (Hotkey(key: "n", modifiers: ["command"]), "New Window"),
-                (Hotkey(key: "s", modifiers: ["command"]), "Save"),
-                (Hotkey(key: "o", modifiers: ["command"]), "Open"),
-                (Hotkey(key: "p", modifiers: ["command"]), "Print"),
-                (Hotkey(key: "delete", modifiers: ["command"]), "Delete")
-            ]
-            
-            for (shortcutHotkey, description) in systemShortcuts {
-                if shortcutHotkey.key == hotkey.key {
-                    // Check if all modifiers match
-                    let shortcutModifiersSet = Set(shortcutHotkey.modifiers)
-                    let hotkeyModifiersSet = Set(hotkey.modifiers)
-                    
-                    if shortcutModifiersSet == hotkeyModifiersSet {
-                        return "This shortcut conflicts with the system shortcut for '\(description)'"
-                    }
-                }
-            }
-            
+            // TODO: Check for conflicts with system shortcuts
             return nil
         }
     }
@@ -915,6 +937,10 @@ class HotkeyManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isSwitcherVisible: Bool = false
+    private var isSettingsVisible: Bool = false
+    private var window: NSWindow? {
+        return NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) })
+    }
     
     func getCurrentHotkey() -> Hotkey? {
         return currentHotkey
@@ -939,10 +965,10 @@ class HotkeyManager {
         currentHotkey = hotkey
         callback = action
         
-        // Create a new monitor for the hotkey
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        // Create a new global monitor for the hotkey with highest priority
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown], handler: { [weak self] event in
             self?.handleKeyEvent(event)
-        }
+        })
         
         // Set up event tap for more reliable global hotkey detection
         setupEventTap()
@@ -956,31 +982,52 @@ class HotkeyManager {
     private func handleKeyEvent(_ event: NSEvent) -> Bool {
         guard let currentHotkey = self.currentHotkey else { return false }
         
-        // Get the exact modifier flags we expect
-        let expectedModifiers = self.expectedModifierFlags(for: currentHotkey)
+        // Check for specific modifier keys
+        let hasCommand = event.modifierFlags.contains(.command)
+        let hasControl = event.modifierFlags.contains(.control)
+        let hasOption = event.modifierFlags.contains(.option)
+        let hasShift = event.modifierFlags.contains(.shift)
         
-        // Check if the event's modifiers exactly match what we expect
-        let modifiersMatch = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == expectedModifiers
+        // Check if modifiers match the hotkey
+        var modifiersMatch = true
+        for modifier in currentHotkey.modifiers {
+            switch modifier.lowercased() {
+            case "command":
+                if !hasCommand { modifiersMatch = false }
+            case "control":
+                if !hasControl { modifiersMatch = false }
+            case "option":
+                if !hasOption { modifiersMatch = false }
+            case "shift":
+                if !hasShift { modifiersMatch = false }
+            default:
+                break
+            }
+        }
         
-        if modifiersMatch {
-            // Only then check the key code
+        // For key down events, also check the key code
+        if event.type == .keyDown {
             let keyMatch = event.keyCode == self.keyCode(for: currentHotkey.key)
-            if keyMatch {
-                DispatchQueue.main.async { [weak self] in
-                    if let self = self {
+            if modifiersMatch && keyMatch {
+                // Use userInteractive QoS for UI updates
+                DispatchQueue.main.async(qos: .userInteractive) { [weak self] in
+                    guard let self = self else { return }
+                    
+                    // If settings is visible, only allow hiding the app
+                    if self.isSettingsVisible {
                         if self.isSwitcherVisible {
-                            // If switcher is visible, hide it
-                            if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
-                                window.orderOut(nil)
-                                self.isSwitcherVisible = false
-                            }
-                        } else {
-                            // If switcher is hidden, show it and clear search
-                            self.callback?()
-                            self.isSwitcherVisible = true
-                            // Clear the search input
-                            NotificationCenter.default.post(name: .clearSearch, object: nil)
+                            self.hideSwitcher()
+                            NSApp.hide(nil)
                         }
+                        return
+                    }
+                    
+                    // Toggle the switcher state
+                    if self.isSwitcherVisible {
+                        self.hideSwitcher()
+                        NSApp.hide(nil)
+                    } else {
+                        self.showSwitcher()
                     }
                 }
                 return true
@@ -989,8 +1036,39 @@ class HotkeyManager {
         return false
     }
     
+    private func showSwitcher() {
+        guard let window = self.window else { return }
+        isSwitcherVisible = true
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        callback?()
+        NotificationCenter.default.post(name: .clearSearch, object: nil)
+    }
+    
+    private func hideSwitcher() {
+        guard let window = self.window else { return }
+        isSwitcherVisible = false
+        
+        // Only order out if the window is actually visible
+        if window.isVisible {
+            window.orderOut(nil)
+        }
+        
+        // Ensure we're not trying to make any window key
+        NSApp.hide(nil)
+        NotificationCenter.default.post(name: .clearSearch, object: nil)
+    }
+    
     func setSwitcherVisible(_ visible: Bool) {
-        isSwitcherVisible = visible
+        if visible {
+            showSwitcher()
+        } else {
+            hideSwitcher()
+        }
+    }
+    
+    func setSettingsVisible(_ visible: Bool) {
+        isSettingsVisible = visible
     }
     
     private func setupEventTap() {
@@ -1004,7 +1082,8 @@ class HotkeyManager {
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 let hotkeyManager = Unmanaged<HotkeyManager>.fromOpaque(refcon!).takeUnretainedValue()
                 if let nsEvent = NSEvent(cgEvent: event) {
-                    if hotkeyManager.handleKeyEvent(nsEvent) {
+                    let eventHandled = hotkeyManager.handleKeyEvent(nsEvent)
+                    if eventHandled {
                         // If handleKeyEvent returns true, consume the event
                         return nil
                     }
@@ -1310,5 +1389,26 @@ struct AnimatedImageView: NSViewRepresentable {
     private func disableAnimation(for imageView: NSImageView) {
         // Disable animation on NSImageView
         imageView.animates = false
+    }
+}
+
+// Add environment values for settings and image picker states
+private struct IsSettingsVisibleKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+private struct IsImagePickerActiveKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+extension EnvironmentValues {
+    var isSettingsVisible: Bool {
+        get { self[IsSettingsVisibleKey.self] }
+        set { self[IsSettingsVisibleKey.self] = newValue }
+    }
+    
+    var isImagePickerActive: Bool {
+        get { self[IsImagePickerActiveKey.self] }
+        set { self[IsImagePickerActiveKey.self] = newValue }
     }
 }

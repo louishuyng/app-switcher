@@ -12,11 +12,15 @@ struct AppSwitcherApp: App {
     @NSApplicationDelegateAdaptor(AppSwitcherAppDelegate.self) var appDelegate
     
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra("AppSwitcher", systemImage: "command") {
+            Button("Settings...") {
+                appDelegate.showSettings()
+            }
+            Divider()
+            Button("Quit") {
+                NSApplication.shared.terminate(nil)
+            }
         }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
     }
 }
 
@@ -62,11 +66,15 @@ class AppSwitcherAppDelegate: NSObject, NSApplicationDelegate {
             self.settingsWindowController?.close()
         })
         let hosting = NSHostingController(rootView: settingsView)
-        let window = NSWindow(contentViewController: hosting)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
         window.title = "Settings"
-        window.setContentSize(NSSize(width: 700, height: 500))
-        window.styleMask = [.titled, .closable, .miniaturizable]
         window.center()
+        window.contentViewController = hosting
         settingsWindowController = NSWindowController(window: window)
         settingsWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -127,8 +135,12 @@ class SwitcherWindowController: NSWindowController {
     init() {
         let contentView = ContentView()
         let hosting = NSHostingController(rootView: contentView)
-        let window = DraggableWindow(contentViewController: hosting)
-        window.styleMask = [.borderless]
+        let window = DraggableWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 408),
+            styleMask: [.borderless, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
         window.isOpaque = false
         window.backgroundColor = .clear
         window.level = .floating
@@ -137,6 +149,7 @@ class SwitcherWindowController: NSWindowController {
         window.contentView?.wantsLayer = true
         window.contentView?.layer?.masksToBounds = true
         window.contentView?.layer?.cornerRadius = 12
+        window.contentViewController = hosting
         window.makeFirstResponder(hosting.view)
         super.init(window: window)
     }
@@ -146,6 +159,9 @@ class SwitcherWindowController: NSWindowController {
 class DraggableWindow: NSWindow {
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        self.isMovableByWindowBackground = true
+        self.titleVisibility = .hidden
+        self.titlebarAppearsTransparent = true
     }
     
     override var canBecomeKey: Bool { true }
