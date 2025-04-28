@@ -153,6 +153,7 @@ struct ContentView: View {
                     }
                 }
                 .frame(width: 300, height: 408)
+                .clipped()
                 
                 // Right: App List
                 ZStack {
@@ -213,8 +214,14 @@ struct ContentView: View {
             
             // Register for image change notification
             NotificationCenter.default.addObserver(forName: .imageChanged, object: nil, queue: .main) { _ in
-                self.selectedImage = UserDefaults.standard.data(forKey: "leftImage").flatMap { NSImage(data: $0) }
-                checkIfSelectedImageIsGIF()
+                if let data = UserDefaults.standard.data(forKey: "leftImage") {
+                    // Create a new NSImage from the data
+                    let newImage = NSImage(data: data)
+                    if newImage != nil {
+                        self.selectedImage = newImage
+                        checkIfSelectedImageIsGIF()
+                    }
+                }
             }
         }
         .onChange(of: searchModel.searchText) { _, _ in
@@ -224,7 +231,7 @@ struct ContentView: View {
             checkIfSelectedImageIsGIF()
         }
         .sheet(isPresented: $showingImagePicker) {
-            ImagePicker(image: $selectedImage)
+            ImagePicker(image: $selectedImage, isPresented: $showingImagePicker)
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView(selectedImage: $selectedImage, hotkey: $hotkey)
@@ -279,15 +286,17 @@ struct ContentView: View {
     
     private func checkIfSelectedImageIsGIF() {
         if let image = selectedImage {
-            // Multiple representations typically indicates an animated image
-            if image.representations.count > 1 {
+            // Check if the image data is a GIF
+            if let data = UserDefaults.standard.data(forKey: "leftImage"),
+               let source = CGImageSourceCreateWithData(data as CFData, nil),
+               let type = CGImageSourceGetType(source) as String?,
+               type == UTType.gif.identifier {
                 isSelectedImageGIF = true
                 return
             }
             
-            // Check if image has CGImage (static images usually do)
-            if image.cgImage(forProposedRect: nil, context: nil, hints: nil) == nil {
-                // No CGImage might indicate it's an animated format
+            // Fallback check for multiple representations
+            if image.representations.count > 1 {
                 isSelectedImageGIF = true
                 return
             }
@@ -494,6 +503,7 @@ struct SettingsView: View {
     @State private var pendingHotkey: Hotkey? = nil
     @State private var accessibilityGranted = AXIsProcessTrusted()
     @State private var timer: Timer? = nil
+    
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -611,10 +621,23 @@ struct SettingsView: View {
             timer?.invalidate()
         }
         .sheet(isPresented: $showingImagePicker) {
-            ImagePicker(image: $selectedImage)
+            ImagePicker(image: $selectedImage, isPresented: $showingImagePicker)
                 .onDisappear {
-                    if let img = selectedImage, let data = img.tiffRepresentation {
-                        UserDefaults.standard.set(data, forKey: "leftImage")
+                    if let image = selectedImage {
+                        // Save the image data based on its type
+                        if let data = UserDefaults.standard.data(forKey: "leftImage"),
+                           let source = CGImageSourceCreateWithData(data as CFData, nil),
+                           let type = CGImageSourceGetType(source) as String?,
+                           type == UTType.gif.identifier {
+                            // If it's a GIF, we already have the correct data saved
+                            NotificationCenter.default.post(name: .imageChanged, object: nil)
+                        } else {
+                            // For other image types, save as TIFF
+                            if let tiffData = image.tiffRepresentation {
+                                UserDefaults.standard.set(tiffData, forKey: "leftImage")
+                                NotificationCenter.default.post(name: .imageChanged, object: nil)
+                            }
+                        }
                     }
                 }
         }
@@ -927,9 +950,10 @@ struct VisualEffectBlur: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-// MARK: - Update ImagePicker to better handle GIFs
+// MARK: - Update ImagePicker to better handle GIFs and dismiss sheet
 struct ImagePicker: NSViewControllerRepresentable {
     @Binding var image: NSImage?
+    @Binding var isPresented: Bool
     
     func makeCoordinator() -> Coordinator { 
         Coordinator(self) 
@@ -952,9 +976,10 @@ struct ImagePicker: NSViewControllerRepresentable {
         
         DispatchQueue.main.async {
             if picker.runModal() == .OK, let url = picker.url {
-                // Load the image based on file type
                 loadImage(from: url)
             }
+            // Dismiss the sheet after picking or cancelling
+            isPresented = false
         }
         
         return viewController
@@ -968,16 +993,25 @@ struct ImagePicker: NSViewControllerRepresentable {
         // Special handling for GIFs to preserve animation
         if fileExtension == "gif" {
             if let gifData = try? Data(contentsOf: url) {
+                // Create NSImage from GIF data
                 let gifImage = NSImage(data: gifData)
+                
+                // Ensure the image has the correct size
+                if let gifImage = gifImage {
+                    gifImage.size = NSSize(width: 300, height: 408)
+                }
+                
                 self.image = gifImage
                 
-                // Save the raw data to preserve animation
+                // Save the raw GIF data to preserve animation
                 UserDefaults.standard.set(gifData, forKey: "leftImage")
                 NotificationCenter.default.post(name: .imageChanged, object: nil)
             }
         } else {
             // For other image types
             if let nsImage = NSImage(contentsOf: url) {
+                // Set the correct size
+                nsImage.size = NSSize(width: 300, height: 408)
                 self.image = nsImage
                 
                 // Save as TIFF representation for standard images
@@ -1080,6 +1114,9 @@ struct AnimatedImageView: NSViewRepresentable {
         let imageView = NSImageView()
         imageView.image = image
         imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.imageFrameStyle = .none
+        imageView.imageAlignment = .alignCenter
+        imageView.imageScaling = .scaleAxesIndependently
         
         // Enable animation for GIFs
         if isAnimating {
@@ -1091,6 +1128,9 @@ struct AnimatedImageView: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSImageView, context: Context) {
         nsView.image = image
+        nsView.imageScaling = .scaleAxesIndependently
+        nsView.imageFrameStyle = .none
+        nsView.imageAlignment = .alignCenter
         
         if isAnimating {
             enableAnimation(for: nsView)
@@ -1102,6 +1142,12 @@ struct AnimatedImageView: NSViewRepresentable {
     private func enableAnimation(for imageView: NSImageView) {
         // Enable animation on NSImageView
         imageView.animates = true
+        
+        // If the image has multiple representations (like a GIF), ensure animation is enabled
+        if image.representations.count > 1 {
+            imageView.animates = true
+            imageView.imageScaling = .scaleAxesIndependently
+        }
     }
     
     private func disableAnimation(for imageView: NSImageView) {
