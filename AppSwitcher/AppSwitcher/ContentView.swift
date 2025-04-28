@@ -53,12 +53,74 @@ class SearchModel: ObservableObject {
     @Published var searchFieldFocused: Bool = false
 }
 
+// MARK: - AppNavigationManager
+class AppNavigationManager: ObservableObject {
+    @Published var selectedAppId: UUID? = nil
+    private var apps: [AppInfo] = []
+    private var lastSelectedIndex: Int? = nil
+    
+    func setApps(_ newApps: [AppInfo]) {
+        let oldSelectedId = selectedAppId
+        apps = newApps
+        
+        // Try to maintain selection if possible
+        if let oldId = oldSelectedId,
+           let oldIndex = apps.firstIndex(where: { $0.id == oldId }) {
+            selectedAppId = apps[oldIndex].id
+            lastSelectedIndex = oldIndex
+        } else if !apps.isEmpty {
+            // Select first item if no previous selection or selection not found
+            selectedAppId = apps[0].id
+            lastSelectedIndex = 0
+        } else {
+            selectedAppId = nil
+            lastSelectedIndex = nil
+        }
+    }
+    
+    func moveUp() {
+        guard !apps.isEmpty else { return }
+        
+        if let currentIndex = lastSelectedIndex {
+            let prevIndex = max(currentIndex - 1, 0)
+            selectIndex(prevIndex)
+        } else {
+            selectIndex(apps.count - 1)
+        }
+    }
+    
+    func moveDown() {
+        guard !apps.isEmpty else { return }
+        
+        if let currentIndex = lastSelectedIndex {
+            let nextIndex = min(currentIndex + 1, apps.count - 1)
+            selectIndex(nextIndex)
+        } else {
+            selectIndex(0)
+        }
+    }
+    
+    private func selectIndex(_ index: Int) {
+        guard index >= 0 && index < apps.count else { return }
+        selectedAppId = apps[index].id
+        lastSelectedIndex = index
+    }
+    
+    func selectApp(_ appId: UUID) {
+        if let index = apps.firstIndex(where: { $0.id == appId }) {
+            selectIndex(index)
+        }
+    }
+    
+    func getSelectedApp() -> AppInfo? {
+        return apps.first { $0.id == selectedAppId }
+    }
+}
+
 // MARK: - ContentView
 struct ContentView: View {
     @State private var selectedImage: NSImage? = UserDefaults.standard.data(forKey: "leftImage").flatMap { NSImage(data: $0) } ?? NSImage(named: "NSPhoto")
     @State private var showingImagePicker = false
-    @State private var selectedApp: UUID? = nil
-    @State private var hoveredApp: UUID? = nil
     @State private var apps: [AppInfo] = []
     @State private var showingSettings = false
     @State private var hotkey: Hotkey = {
@@ -69,26 +131,13 @@ struct ContentView: View {
         }
     }()
     @StateObject private var searchModel = SearchModel()
+    @StateObject private var navigationManager = AppNavigationManager()
+    
     var filteredApps: [AppInfo] {
         if searchModel.searchText.isEmpty { return apps }
         return apps.filter { $0.name.localizedCaseInsensitiveContains(searchModel.searchText) }
     }
-    // Helper view for app list
-    private func appList(scrollProxy: ScrollViewProxy) -> some View {
-        ForEach(filteredApps) { app in
-            AppRow(app: app, isHighlighted: hoveredApp == app.id)
-                .id(app.id)
-                .contentShape(Rectangle())
-                .onTapGesture { openApp(app) }
-                .onHover { hovering in
-                    if hovering {
-                        hoveredApp = app.id
-                    } else if hoveredApp == app.id {
-                        hoveredApp = nil
-                    }
-                }
-        }
-    }
+    
     var body: some View {
         ZStack {
             HStack(spacing: 0) {
@@ -110,11 +159,13 @@ struct ContentView: View {
                     }
                 }
                 .frame(width: 300, height: 408)
+                
                 // Divider (blue)
                 Rectangle()
                     .fill(Color(red: 0.36, green: 0.60, blue: 0.98, opacity: 0.5))
                     .frame(width: 2, height: 408)
-                // Right: App List with background (no border, only right radius)
+                
+                // Right: App List with background
                 ZStack {
                     RoundedCorner(radius: 12, corners: [.topRight, .bottomRight])
                         .fill(Color(red: 0.13, green: 0.15, blue: 0.20, opacity: 0.92))
@@ -126,19 +177,7 @@ struct ContentView: View {
                                 .padding(.leading, 16)
                                 .padding(.trailing, 0)
                         }
-                        ScrollViewReader { scrollProxy in
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 0) {
-                                    appList(scrollProxy: scrollProxy)
-                                }
-                            }
-                            .onChange(of: selectedApp) { oldValue, newValue in
-                                if let id = newValue {
-                                    withAnimation(.none) { scrollProxy.scrollTo(id, anchor: .center) }
-                                }
-                            }
-                            .gesture(DragGesture().onChanged { _ in hoveredApp = nil })
-                        }
+                        appList
                     }
                 }
                 .frame(width: 340, height: 408)
@@ -149,7 +188,31 @@ struct ContentView: View {
         .edgesIgnoringSafeArea(.all)
         .onAppear {
             apps = getInstalledApps()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { searchModel.searchFieldFocused = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                searchModel.searchFieldFocused = true
+                navigationManager.setApps(filteredApps)
+            }
+        }
+        .onChange(of: searchModel.searchText) { _, _ in
+            navigationManager.setApps(filteredApps)
+        }
+        .onKeyDown { event in
+            if event.modifierFlags.contains(.command) && event.characters == "," {
+                showingSettings = true
+            }
+            
+            switch event.keyCode {
+            case 125: // Down arrow
+                navigationManager.moveDown()
+            case 126: // Up arrow
+                navigationManager.moveUp()
+            case 36: // Return/Enter
+                if let app = navigationManager.getSelectedApp() {
+                    openApp(app)
+                }
+            default:
+                break
+            }
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $selectedImage)
@@ -158,18 +221,34 @@ struct ContentView: View {
             SettingsView(selectedImage: $selectedImage, hotkey: $hotkey)
         }
         .onExitCommand(perform: closeSwitcher)
-        .onKeyDown { event in
-            if event.modifierFlags.contains(.command) && event.characters == "," {
-                showingSettings = true
+    }
+    
+    private var appList: some View {
+        ScrollViewReader { scrollProxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(filteredApps) { app in
+                        AppRow(app: app, isHighlighted: navigationManager.selectedAppId == app.id)
+                            .id(app.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture { openApp(app) }
+                            .onHover { hovering in
+                                if hovering {
+                                    navigationManager.selectApp(app.id)
+                                }
+                            }
+                    }
+                }
+                .padding(.vertical, 8)
             }
-        }
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button(action: { showingSettings = true }) {}
-                    .keyboardShortcut(",", modifiers: .command)
+            .onChange(of: navigationManager.selectedAppId) { _, newValue in
+                if let id = newValue {
+                    withAnimation(.none) { scrollProxy.scrollTo(id, anchor: .center) }
+                }
             }
         }
     }
+    
     func openApp(_ app: AppInfo) {
         let workspace = NSWorkspace.shared
         let appsURL = URL(fileURLWithPath: "/Applications")
@@ -187,6 +266,7 @@ struct ContentView: View {
             }
         }
     }
+    
     func closeSwitcher() {
         if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
             window.orderOut(nil)
