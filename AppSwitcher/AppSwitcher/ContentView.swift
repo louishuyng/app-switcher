@@ -122,6 +122,7 @@ struct ContentView: View {
     @StateObject private var searchModel = SearchModel()
     @StateObject private var navigationManager = AppNavigationManager()
     @State private var isScrolling = false
+    @State private var outsideClickMonitor: Any? = nil
     
     var filteredApps: [AppInfo] {
         if searchModel.searchText.isEmpty { return apps }
@@ -223,6 +224,16 @@ struct ContentView: View {
                     }
                 }
             }
+            // Add global monitor for mouse down events
+            outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+                if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
+                    let mouseLocation = NSEvent.mouseLocation
+                    let windowFrame = window.frame
+                    if !windowFrame.contains(mouseLocation) {
+                        closeSwitcher()
+                    }
+                }
+            }
         }
         .onChange(of: searchModel.searchText) { _, _ in
             navigationManager.setApps(filteredApps)
@@ -237,6 +248,12 @@ struct ContentView: View {
             SettingsView(selectedImage: $selectedImage, hotkey: $hotkey)
         }
         .onExitCommand(perform: closeSwitcher)
+        .onDisappear {
+            if let monitor = outsideClickMonitor {
+                NSEvent.removeMonitor(monitor)
+                outsideClickMonitor = nil
+            }
+        }
     }
     
     private var appList: some View {
