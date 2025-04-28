@@ -16,6 +16,7 @@ struct AppInfo: Identifiable {
     let name: String
     let icon: NSImage
     let description: String?
+    var isAnimated: Bool = false
 }
 
 func getInstalledApps() -> [AppInfo] {
@@ -107,6 +108,7 @@ class AppNavigationManager: ObservableObject {
 // MARK: - ContentView
 struct ContentView: View {
     @State private var selectedImage: NSImage? = UserDefaults.standard.data(forKey: "leftImage").flatMap { NSImage(data: $0) } ?? NSImage(named: "NSPhoto")
+    @State private var isSelectedImageGIF: Bool = false
     @State private var showingImagePicker = false
     @State private var apps: [AppInfo] = []
     @State private var showingSettings = false
@@ -132,11 +134,17 @@ struct ContentView: View {
                 // Left: Image
                 ZStack {
                     if let image = selectedImage {
-                        Image(nsImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 300, height: 408)
-                            .clipped()
+                        if isSelectedImageGIF {
+                            AnimatedImageView(image: image)
+                                .frame(width: 300, height: 408)
+                                .clipped()
+                        } else {
+                            Image(nsImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 300, height: 408)
+                                .clipped()
+                        }
                     } else {
                         Rectangle()
                             .fill(Color.gray.opacity(0.2))
@@ -197,13 +205,23 @@ struct ContentView: View {
         )
         .onAppear {
             apps = getInstalledApps()
+            checkIfSelectedImageIsGIF()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 searchModel.searchFieldFocused = true
                 navigationManager.setApps(filteredApps)
             }
+            
+            // Register for image change notification
+            NotificationCenter.default.addObserver(forName: .imageChanged, object: nil, queue: .main) { _ in
+                self.selectedImage = UserDefaults.standard.data(forKey: "leftImage").flatMap { NSImage(data: $0) }
+                checkIfSelectedImageIsGIF()
+            }
         }
         .onChange(of: searchModel.searchText) { _, _ in
             navigationManager.setApps(filteredApps)
+        }
+        .onChange(of: selectedImage) { _, _ in
+            checkIfSelectedImageIsGIF()
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $selectedImage)
@@ -256,6 +274,27 @@ struct ContentView: View {
             if window.styleMask.contains(.borderless) {
                 window.orderOut(nil)
             }
+        }
+    }
+    
+    private func checkIfSelectedImageIsGIF() {
+        if let image = selectedImage {
+            // Multiple representations typically indicates an animated image
+            if image.representations.count > 1 {
+                isSelectedImageGIF = true
+                return
+            }
+            
+            // Check if image has CGImage (static images usually do)
+            if image.cgImage(forProposedRect: nil, context: nil, hints: nil) == nil {
+                // No CGImage might indicate it's an animated format
+                isSelectedImageGIF = true
+                return
+            }
+            
+            isSelectedImageGIF = false
+        } else {
+            isSelectedImageGIF = false
         }
     }
 }
@@ -589,11 +628,13 @@ struct HotkeyPickerOverlay: NSViewRepresentable {
     @Binding var hotkey: Hotkey
     @Binding var hotkeyConflict: String?
     @Binding var pendingHotkey: Hotkey?
+    
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         context.coordinator.parent = self
         return view
     }
+    
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.parent = self
         if listening {
@@ -602,55 +643,101 @@ struct HotkeyPickerOverlay: NSViewRepresentable {
             context.coordinator.stopListening()
         }
     }
+    
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
     }
+    
     class Coordinator: NSObject {
         var parent: HotkeyPickerOverlay
         var monitor: Any?
+        
         init(parent: HotkeyPickerOverlay) {
             self.parent = parent
         }
+        
         func startListening() {
             stopListening()
+            
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self = self else { return event }
-                DispatchQueue.main.async {
-                    let key = self.keyString(for: event)
-                    let mods = self.modifierStrings(for: event)
-                    let newHotkey = Hotkey(key: key, modifiers: mods)
-                    if let conflict = self.checkConflict(hotkey: newHotkey) {
+                
+                // Ignore keys without modifiers
+                let hasModifiers = event.modifierFlags.contains(.command) ||
+                                   event.modifierFlags.contains(.control) ||
+                                   event.modifierFlags.contains(.option) ||
+                                   event.modifierFlags.contains(.shift)
+                
+                if !hasModifiers {
+                    // Require at least one modifier key
+                    return event
+                }
+                
+                // Get the key string and modifiers
+                let key = self.keyString(for: event)
+                let mods = self.modifierStrings(for: event)
+                
+                // Create new hotkey
+                let newHotkey = Hotkey(key: key, modifiers: mods)
+                
+                // Check for conflicts
+                if let conflict = self.checkConflict(hotkey: newHotkey) {
+                    DispatchQueue.main.async {
                         self.parent.hotkeyConflict = conflict
-                    } else {
+                        self.parent.listening = false
+                    }
+                } else {
+                    DispatchQueue.main.async {
                         self.parent.pendingHotkey = newHotkey
                         self.parent.hotkeyConflict = nil
+                        self.parent.listening = false
                     }
-                    self.parent.listening = false
                 }
+                
                 return nil
             }
         }
+        
         func stopListening() {
             if let monitor = monitor {
                 NSEvent.removeMonitor(monitor)
                 self.monitor = nil
             }
         }
+        
         func keyString(for event: NSEvent) -> String {
-            // Map keyCode to string for common keys
             switch event.keyCode {
             case 49: return "space"
             case 36: return "return"
             case 51: return "delete"
             case 53: return "escape"
             case 43: return ","
+            case 126: return "up"
+            case 125: return "down"
+            case 123: return "left"
+            case 124: return "right"
+            case 48: return "tab"
+            case 117: return "delete"
+            case 122: return "f1"
+            case 120: return "f2"
+            case 99: return "f3"
+            case 118: return "f4"
+            case 96: return "f5"
+            case 97: return "f6"
+            case 98: return "f7"
+            case 100: return "f8"
+            case 101: return "f9"
+            case 109: return "f10"
+            case 103: return "f11"
+            case 111: return "f12"
             default:
-                if let chars = event.charactersIgnoringModifiers, chars.count == 1 {
+                if let chars = event.charactersIgnoringModifiers, !chars.isEmpty {
                     return chars.lowercased()
                 }
                 return "unknown"
             }
         }
+        
         func modifierStrings(for event: NSEvent) -> [String] {
             var mods: [String] = []
             if event.modifierFlags.contains(.control) { mods.append("control") }
@@ -659,8 +746,59 @@ struct HotkeyPickerOverlay: NSViewRepresentable {
             if event.modifierFlags.contains(.shift) { mods.append("shift") }
             return mods
         }
+        
         func checkConflict(hotkey: Hotkey) -> String? {
-            // TODO: Handle check conflict
+            // Check for empty keycodes
+            if hotkey.key.isEmpty || hotkey.key == "unknown" {
+                return "Invalid key detected"
+            }
+            
+            // Require at least one modifier
+            if hotkey.modifiers.isEmpty {
+                return "At least one modifier key (Command, Option, Control, or Shift) is required"
+            }
+            
+            // Check for system shortcuts
+            let systemShortcuts: [(hotkey: Hotkey, description: String)] = [
+                (Hotkey(key: "space", modifiers: ["command"]), "Spotlight"),
+                (Hotkey(key: "tab", modifiers: ["command"]), "App Switcher"),
+                (Hotkey(key: "w", modifiers: ["command"]), "Close Window"),
+                (Hotkey(key: "q", modifiers: ["command"]), "Quit Application"),
+                (Hotkey(key: "h", modifiers: ["command"]), "Hide Application"),
+                (Hotkey(key: "m", modifiers: ["command"]), "Minimize Window"),
+                (Hotkey(key: "c", modifiers: ["command"]), "Copy"),
+                (Hotkey(key: "v", modifiers: ["command"]), "Paste"),
+                (Hotkey(key: "x", modifiers: ["command"]), "Cut"),
+                (Hotkey(key: "a", modifiers: ["command"]), "Select All"),
+                (Hotkey(key: "z", modifiers: ["command"]), "Undo"),
+                (Hotkey(key: "z", modifiers: ["command", "shift"]), "Redo"),
+                (Hotkey(key: ",", modifiers: ["command"]), "Preferences"),
+                (Hotkey(key: "f", modifiers: ["command"]), "Find"),
+                (Hotkey(key: "g", modifiers: ["command"]), "Find Next"),
+                (Hotkey(key: "g", modifiers: ["command", "shift"]), "Find Previous"),
+                (Hotkey(key: "f", modifiers: ["command", "option"]), "Search in Spotlight"),
+                (Hotkey(key: "l", modifiers: ["command"]), "Go to Address Bar"),
+                (Hotkey(key: "r", modifiers: ["command"]), "Refresh"),
+                (Hotkey(key: "t", modifiers: ["command"]), "New Tab"),
+                (Hotkey(key: "n", modifiers: ["command"]), "New Window"),
+                (Hotkey(key: "s", modifiers: ["command"]), "Save"),
+                (Hotkey(key: "o", modifiers: ["command"]), "Open"),
+                (Hotkey(key: "p", modifiers: ["command"]), "Print"),
+                (Hotkey(key: "delete", modifiers: ["command"]), "Delete")
+            ]
+            
+            for (shortcutHotkey, description) in systemShortcuts {
+                if shortcutHotkey.key == hotkey.key {
+                    // Check if all modifiers match
+                    let shortcutModifiersSet = Set(shortcutHotkey.modifiers)
+                    let hotkeyModifiersSet = Set(hotkey.modifiers)
+                    
+                    if shortcutModifiersSet == hotkeyModifiersSet {
+                        return "This shortcut conflicts with the system shortcut for '\(description)'"
+                    }
+                }
+            }
+            
             return nil
         }
     }
@@ -671,22 +809,57 @@ class HotkeyManager {
     static let shared = HotkeyManager()
     private var monitor: Any?
     private var callback: (() -> Void)?
+    private var currentHotkey: Hotkey?
+    
     func setHotkey(_ hotkey: Hotkey, action: @escaping () -> Void) {
+        // Remove existing monitor if any
         if let monitor = monitor {
             NSEvent.removeMonitor(monitor)
+            self.monitor = nil
         }
+        
+        // Store the current hotkey and callback
+        currentHotkey = hotkey
         callback = action
+        
+        // Create a new monitor for the hotkey
         monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self else { return }
-            let keyMatch = event.keyCode == self.keyCode(for: hotkey.key)
-            let modsMatch = self.modifiersMatch(event: event, hotkey: hotkey)
-            if keyMatch && modsMatch {
-                DispatchQueue.main.async {
-                    action()
+            guard let self = self, let currentHotkey = self.currentHotkey else { return }
+            
+            // Get the exact modifier flags we expect
+            let expectedModifiers = self.expectedModifierFlags(for: currentHotkey)
+            
+            // Check if the event's modifiers exactly match what we expect
+            let modifiersMatch = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == expectedModifiers
+            
+            if modifiersMatch {
+                // Only then check the key code
+                let keyMatch = event.keyCode == self.keyCode(for: currentHotkey.key)
+                if keyMatch {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.callback?()
+                    }
                 }
             }
         }
     }
+    
+    private func expectedModifierFlags(for hotkey: Hotkey) -> NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        
+        for modifier in hotkey.modifiers {
+            switch modifier.lowercased() {
+            case "control": flags.insert(.control)
+            case "command": flags.insert(.command)
+            case "option": flags.insert(.option)
+            case "shift": flags.insert(.shift)
+            default: break
+            }
+        }
+        
+        return flags
+    }
+    
     private func keyCode(for key: String) -> UInt16 {
         switch key.lowercased() {
         case "space": return 49
@@ -738,14 +911,6 @@ class HotkeyManager {
         default: return 0
         }
     }
-    private func modifiersMatch(event: NSEvent, hotkey: Hotkey) -> Bool {
-        let mods = hotkey.modifiers
-        let ctrl = mods.contains("control") ? event.modifierFlags.contains(.control) : !event.modifierFlags.contains(.control)
-        let cmd = mods.contains("command") ? event.modifierFlags.contains(.command) : !event.modifierFlags.contains(.command)
-        let opt = mods.contains("option") ? event.modifierFlags.contains(.option) : !event.modifierFlags.contains(.option)
-        let shift = mods.contains("shift") ? event.modifierFlags.contains(.shift) : !event.modifierFlags.contains(.shift)
-        return ctrl && cmd && opt && shift
-    }
 }
 
 // VisualEffectBlur for macOS
@@ -762,10 +927,14 @@ struct VisualEffectBlur: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-// ImagePicker for macOS
+// MARK: - Update ImagePicker to better handle GIFs
 struct ImagePicker: NSViewControllerRepresentable {
     @Binding var image: NSImage?
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    
+    func makeCoordinator() -> Coordinator { 
+        Coordinator(self) 
+    }
+    
     func makeNSViewController(context: Context) -> NSViewController {
         let picker = NSOpenPanel()
         picker.allowedContentTypes = [
@@ -773,20 +942,53 @@ struct ImagePicker: NSViewControllerRepresentable {
             UTType.jpeg,
             UTType.bmp,
             UTType.gif,
-            UTType.tiff
+            UTType.tiff,
+            UTType.image
         ]
         picker.canChooseFiles = true
         picker.canChooseDirectories = false
         picker.allowsMultipleSelection = false
         let viewController = NSViewController()
+        
         DispatchQueue.main.async {
-            if picker.runModal() == .OK, let url = picker.url, let nsImage = NSImage(contentsOf: url) {
-                image = nsImage
+            if picker.runModal() == .OK, let url = picker.url {
+                // Load the image based on file type
+                loadImage(from: url)
             }
         }
+        
         return viewController
     }
+    
     func updateNSViewController(_ nsViewController: NSViewController, context: Context) {}
+    
+    private func loadImage(from url: URL) {
+        let fileExtension = url.pathExtension.lowercased()
+        
+        // Special handling for GIFs to preserve animation
+        if fileExtension == "gif" {
+            if let gifData = try? Data(contentsOf: url) {
+                let gifImage = NSImage(data: gifData)
+                self.image = gifImage
+                
+                // Save the raw data to preserve animation
+                UserDefaults.standard.set(gifData, forKey: "leftImage")
+                NotificationCenter.default.post(name: .imageChanged, object: nil)
+            }
+        } else {
+            // For other image types
+            if let nsImage = NSImage(contentsOf: url) {
+                self.image = nsImage
+                
+                // Save as TIFF representation for standard images
+                if let tiffData = nsImage.tiffRepresentation {
+                    UserDefaults.standard.set(tiffData, forKey: "leftImage")
+                    NotificationCenter.default.post(name: .imageChanged, object: nil)
+                }
+            }
+        }
+    }
+    
     class Coordinator: NSObject {
         let parent: ImagePicker
         init(_ parent: ImagePicker) { self.parent = parent }
@@ -796,6 +998,7 @@ struct ImagePicker: NSViewControllerRepresentable {
 // Notification for hotkey change
 extension Notification.Name {
     static let hotkeyChanged = Notification.Name("hotkeyChanged")
+    static let imageChanged = Notification.Name("imageChanged")
 }
 
 #Preview {
@@ -865,5 +1068,44 @@ struct RoundedCorner: Shape {
         }
         path.closeSubpath()
         return path
+    }
+}
+
+// MARK: - AnimatedImageView
+struct AnimatedImageView: NSViewRepresentable {
+    var image: NSImage
+    var isAnimating: Bool = true
+    
+    func makeNSView(context: Context) -> NSImageView {
+        let imageView = NSImageView()
+        imageView.image = image
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        
+        // Enable animation for GIFs
+        if isAnimating {
+            enableAnimation(for: imageView)
+        }
+        
+        return imageView
+    }
+    
+    func updateNSView(_ nsView: NSImageView, context: Context) {
+        nsView.image = image
+        
+        if isAnimating {
+            enableAnimation(for: nsView)
+        } else {
+            disableAnimation(for: nsView)
+        }
+    }
+    
+    private func enableAnimation(for imageView: NSImageView) {
+        // Enable animation on NSImageView
+        imageView.animates = true
+    }
+    
+    private func disableAnimation(for imageView: NSImageView) {
+        // Disable animation on NSImageView
+        imageView.animates = false
     }
 }

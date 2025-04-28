@@ -57,7 +57,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func setupHotkey() {
-        HotkeyManager.shared.setHotkey(hotkey) {
+        HotkeyManager.shared.setHotkey(hotkey) { [weak self] in
+            guard let self = self else { return }
             self.showSwitcher()
         }
     }
