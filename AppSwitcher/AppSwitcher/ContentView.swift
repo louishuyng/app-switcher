@@ -8,6 +8,7 @@
 import SwiftUI
 import AppKit
 import ApplicationServices
+import UniformTypeIdentifiers
 
 struct AppInfo: Identifiable {
     let id = UUID()
@@ -62,7 +63,7 @@ struct ContentView: View {
         }
     }()
     @State private var searchText: String = ""
-    @FocusState private var searchFieldFocused: Bool
+    @State private var searchFieldFocused: Bool = false
     var filteredApps: [AppInfo] {
         if searchText.isEmpty { return apps }
         return apps.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
@@ -126,8 +127,7 @@ struct ContentView: View {
                                     appList(scrollProxy: scrollProxy)
                                 }
                             }
-                            // Only use scrollProxy here
-                            .onChange(of: selectedApp) { newValue in
+                            .onChange(of: selectedApp) { oldValue, newValue in
                                 if let id = newValue {
                                     withAnimation(.none) { scrollProxy.scrollTo(id, anchor: .center) }
                                 }
@@ -143,22 +143,20 @@ struct ContentView: View {
         .frame(width: 640, height: 408)
         .onAppear {
             apps = getInstalledApps()
-            if let first = filteredApps.first { selectedApp = first.id }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { searchFieldFocused = true }
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $selectedImage)
         }
-        .background(KeyCatcherView(
-            onKeyDown: { event in
-                handleKey(event)
-            },
-            onCmdComma: {
-                showingSettings = true
-            }
-        ))
         .sheet(isPresented: $showingSettings) {
             SettingsView(selectedImage: $selectedImage, hotkey: $hotkey)
+        }
+        .onExitCommand(perform: closeSwitcher)
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button(action: { showingSettings = true }) {}
+                    .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
     func openApp(_ app: AppInfo) {
@@ -183,79 +181,56 @@ struct ContentView: View {
             window.orderOut(nil)
         }
     }
-    func handleKey(_ event: NSEvent) {
-        // Cmd + , always opens settings
-        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "," {
-            showingSettings = true
-            return
-        }
-        // ESC always closes switcher
-        if event.keyCode == 53 {
-            closeSwitcher()
-            return
-        }
-        guard !filteredApps.isEmpty else { return }
-        let currentIndex = filteredApps.firstIndex(where: { $0.id == selectedApp }) ?? 0
-        switch event.keyCode {
-        case 125: // Down arrow
-            let next = min(currentIndex + 1, filteredApps.count - 1)
-            selectedApp = filteredApps[next].id
-        case 126: // Up arrow
-            let prev = max(currentIndex - 1, 0)
-            selectedApp = filteredApps[prev].id
-        case 36, 76: // Return or Enter
-            if let app = filteredApps.first(where: { $0.id == selectedApp }) {
-                openApp(app)
+}
+
+// FocusableTextField: NSTextField that can become first responder in borderless window
+import SwiftUI
+struct FocusableTextField: NSViewRepresentable {
+    class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: FocusableTextField
+        init(_ parent: FocusableTextField) { self.parent = parent }
+        func controlTextDidChange(_ obj: Notification) {
+            if let textField = obj.object as? NSTextField {
+                parent.text = textField.stringValue
             }
-        default:
-            break
+        }
+    }
+    @Binding var text: String
+    @Binding var isFirstResponder: Bool
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSTextField {
+        let textField = NSTextField(string: text)
+        textField.delegate = context.coordinator
+        textField.isBordered = false
+        textField.backgroundColor = .clear
+        textField.font = NSFont.systemFont(ofSize: 24, weight: .medium)
+        textField.focusRingType = .none
+        return textField
+    }
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        if isFirstResponder, nsView.window?.firstResponder != nsView {
+            nsView.becomeFirstResponder()
         }
     }
 }
 
-// Search input with no border, no radius, and a prefix icon
+// Search input with no border, no radius, and a prefix icon, using FocusableTextField
 struct SearchInput: View {
     @Binding var text: String
-    var isFocused: FocusState<Bool>.Binding
+    @Binding var isFocused: Bool
     var body: some View {
         HStack(spacing: 8) {
             Text(">")
                 .font(.system(size: 24, weight: .bold, design: .monospaced))
                 .foregroundColor(.gray)
-            TextField("", text: $text)
-                .textFieldStyle(PlainTextFieldStyle())
-                .foregroundColor(.white)
-                .font(.system(size: 24, weight: .medium, design: .rounded))
-                .padding(.vertical, 8)
-                .focused(isFocused)
+            FocusableTextField(text: $text, isFirstResponder: $isFocused)
+                .frame(height: 32)
         }
         .padding(.horizontal, 0)
         .background(Color.clear)
-    }
-}
-
-// KeyCatcherView for global key handling
-struct KeyCatcherView: NSViewRepresentable {
-    let onKeyDown: (NSEvent) -> Void
-    let onCmdComma: () -> Void
-    func makeNSView(context: Context) -> NSView {
-        let view = KeyCatcher()
-        view.onKeyDown = onKeyDown
-        view.onCmdComma = onCmdComma
-        return view
-    }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-    class KeyCatcher: NSView {
-        var onKeyDown: ((NSEvent) -> Void)?
-        var onCmdComma: (() -> Void)?
-        override var acceptsFirstResponder: Bool { true }
-        override func keyDown(with event: NSEvent) {
-            if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "," {
-                onCmdComma?()
-            } else {
-                onKeyDown?(event)
-            }
-        }
     }
 }
 
@@ -588,7 +563,13 @@ struct ImagePicker: NSViewControllerRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSViewController(context: Context) -> NSViewController {
         let picker = NSOpenPanel()
-        picker.allowedFileTypes = ["png", "jpg", "jpeg", "bmp", "gif", "tiff"]
+        picker.allowedContentTypes = [
+            UTType.png,
+            UTType.jpeg,
+            UTType.bmp,
+            UTType.gif,
+            UTType.tiff
+        ]
         picker.canChooseFiles = true
         picker.canChooseDirectories = false
         picker.allowsMultipleSelection = false

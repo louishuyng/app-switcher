@@ -108,6 +108,7 @@ class SwitcherWindowController: NSWindowController {
         window.level = .floating
         window.hasShadow = true
         window.setFrameCentered(size: NSSize(width: 640, height: 408))
+        window.makeFirstResponder(hosting.view)
         super.init(window: window)
     }
     required init?(coder: NSCoder) { fatalError() }
