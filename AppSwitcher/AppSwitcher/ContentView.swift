@@ -9,6 +9,7 @@ import SwiftUI
 import AppKit
 import ApplicationServices
 import UniformTypeIdentifiers
+import Carbon
 
 struct AppInfo: Identifiable {
     let id = UUID()
@@ -60,18 +61,10 @@ class AppNavigationManager: ObservableObject {
     private var lastSelectedIndex: Int? = nil
     
     func setApps(_ newApps: [AppInfo]) {
-        let oldSelectedId = selectedAppId
         apps = newApps
-        
-        // Try to maintain selection if possible
-        if let oldId = oldSelectedId,
-           let oldIndex = apps.firstIndex(where: { $0.id == oldId }) {
-            selectedAppId = apps[oldIndex].id
-            lastSelectedIndex = oldIndex
-        } else if !apps.isEmpty {
-            // Select first item if no previous selection or selection not found
-            selectedAppId = apps[0].id
-            lastSelectedIndex = 0
+        // Always select first item when setting new apps
+        if !apps.isEmpty {
+            selectIndex(0)
         } else {
             selectedAppId = nil
             lastSelectedIndex = nil
@@ -106,12 +99,6 @@ class AppNavigationManager: ObservableObject {
         lastSelectedIndex = index
     }
     
-    func selectApp(_ appId: UUID) {
-        if let index = apps.firstIndex(where: { $0.id == appId }) {
-            selectIndex(index)
-        }
-    }
-    
     func getSelectedApp() -> AppInfo? {
         return apps.first { $0.id == selectedAppId }
     }
@@ -132,6 +119,7 @@ struct ContentView: View {
     }()
     @StateObject private var searchModel = SearchModel()
     @StateObject private var navigationManager = AppNavigationManager()
+    @State private var isScrolling = false
     
     var filteredApps: [AppInfo] {
         if searchModel.searchText.isEmpty { return apps }
@@ -141,7 +129,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             HStack(spacing: 0) {
-                // Left: Image, no border, only left radius
+                // Left: Image
                 ZStack {
                     if let image = selectedImage {
                         Image(nsImage: image)
@@ -149,33 +137,35 @@ struct ContentView: View {
                             .aspectRatio(contentMode: .fill)
                             .frame(width: 300, height: 408)
                             .clipped()
-                            .clipShape(RoundedCorner(radius: 12, corners: [.topLeft, .bottomLeft]))
                     } else {
                         Rectangle()
                             .fill(Color.gray.opacity(0.2))
                             .frame(width: 300, height: 408)
-                            .clipShape(RoundedCorner(radius: 12, corners: [.topLeft, .bottomLeft]))
                             .overlay(Text("No Image").foregroundColor(.secondary))
                     }
                 }
                 .frame(width: 300, height: 408)
                 
-                // Divider (blue)
-                Rectangle()
-                    .fill(Color(red: 0.36, green: 0.60, blue: 0.98, opacity: 0.5))
-                    .frame(width: 2, height: 408)
-                
-                // Right: App List with background
+                // Right: App List
                 ZStack {
-                    RoundedCorner(radius: 12, corners: [.topRight, .bottomRight])
-                        .fill(Color(red: 0.13, green: 0.15, blue: 0.20, opacity: 0.92))
+                    Color(red: 0.13, green: 0.15, blue: 0.20, opacity: 0.92)
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
-                            SearchInput(text: $searchModel.searchText, isFocused: $searchModel.searchFieldFocused, onCommand: { showingSettings = true }, onEscape: closeSwitcher)
-                                .frame(height: 48)
-                                .padding(.top, 0)
-                                .padding(.leading, 16)
-                                .padding(.trailing, 0)
+                            SearchInput(
+                                text: $searchModel.searchText,
+                                isFocused: $searchModel.searchFieldFocused,
+                                onCommand: { showingSettings = true },
+                                onEscape: closeSwitcher,
+                                onUpArrow: { navigationManager.moveUp() },
+                                onDownArrow: { navigationManager.moveDown() },
+                                onReturn: {
+                                    if let app = navigationManager.getSelectedApp() {
+                                        openApp(app)
+                                    }
+                                }
+                            )
+                            .frame(height: 48)
+                            .padding(.leading, 16)
                         }
                         appList
                     }
@@ -186,6 +176,25 @@ struct ContentView: View {
         }
         .frame(width: 640, height: 408)
         .edgesIgnoringSafeArea(.all)
+        .background(
+            KeyEventHandlingView { event in
+                switch Int(event.keyCode) {
+                case kVK_UpArrow:
+                    navigationManager.moveUp()
+                    return true
+                case kVK_DownArrow:
+                    navigationManager.moveDown()
+                    return true
+                case kVK_Return:
+                    if let app = navigationManager.getSelectedApp() {
+                        openApp(app)
+                    }
+                    return true
+                default:
+                    return false
+                }
+            }
+        )
         .onAppear {
             apps = getInstalledApps()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -195,24 +204,6 @@ struct ContentView: View {
         }
         .onChange(of: searchModel.searchText) { _, _ in
             navigationManager.setApps(filteredApps)
-        }
-        .onKeyDown { event in
-            if event.modifierFlags.contains(.command) && event.characters == "," {
-                showingSettings = true
-            }
-            
-            switch event.keyCode {
-            case 125: // Down arrow
-                navigationManager.moveDown()
-            case 126: // Up arrow
-                navigationManager.moveUp()
-            case 36: // Return/Enter
-                if let app = navigationManager.getSelectedApp() {
-                    openApp(app)
-                }
-            default:
-                break
-            }
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $selectedImage)
@@ -228,24 +219,17 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredApps) { app in
-                        AppRow(app: app, isHighlighted: navigationManager.selectedAppId == app.id)
+                        AppRow(app: app, isSelected: navigationManager.selectedAppId == app.id)
                             .id(app.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture { openApp(app) }
-                            .onHover { hovering in
-                                if hovering {
-                                    navigationManager.selectApp(app.id)
-                                }
-                            }
                     }
                 }
-                .padding(.vertical, 8)
             }
             .onChange(of: navigationManager.selectedAppId) { _, newValue in
                 if let id = newValue {
                     withAnimation(.none) { scrollProxy.scrollTo(id, anchor: .center) }
                 }
             }
+            .allowsHitTesting(false)
         }
     }
     
@@ -268,14 +252,49 @@ struct ContentView: View {
     }
     
     func closeSwitcher() {
-        if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
-            window.orderOut(nil)
+        NSApplication.shared.windows.forEach { window in
+            if window.styleMask.contains(.borderless) {
+                window.orderOut(nil)
+            }
         }
     }
 }
 
-// FocusableTextField: NSTextField that can become first responder in borderless window
-import SwiftUI
+// MARK: - KeyEventHandlingView
+struct KeyEventHandlingView: NSViewRepresentable {
+    let onKeyDown: (NSEvent) -> Bool
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = KeyHandlingView()
+        view.onKeyDown = onKeyDown
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let view = nsView as? KeyHandlingView {
+            view.onKeyDown = onKeyDown
+        }
+    }
+    
+    class KeyHandlingView: NSView {
+        var onKeyDown: ((NSEvent) -> Bool)?
+        
+        override var acceptsFirstResponder: Bool { true }
+        
+        override func keyDown(with event: NSEvent) {
+            if onKeyDown?(event) == true {
+                return
+            }
+            super.keyDown(with: event)
+        }
+        
+        override func becomeFirstResponder() -> Bool {
+            return true
+        }
+    }
+}
+
+// MARK: - FocusableTextField
 struct FocusableTextField: NSViewRepresentable {
     class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: FocusableTextField
@@ -298,6 +317,20 @@ struct FocusableTextField: NSViewRepresentable {
                 parent.onCommand?()
                 return true
             }
+            // Handle arrow keys
+            if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                parent.onUpArrow?()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                parent.onDownArrow?()
+                return true
+            }
+            // Handle return key
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                parent.onReturn?()
+                return true
+            }
             return false
         }
     }
@@ -305,6 +338,10 @@ struct FocusableTextField: NSViewRepresentable {
     @Binding var isFirstResponder: Bool
     var onCommand: (() -> Void)? = nil
     var onEscape: (() -> Void)? = nil
+    var onUpArrow: (() -> Void)? = nil
+    var onDownArrow: (() -> Void)? = nil
+    var onReturn: (() -> Void)? = nil
+    
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSTextField {
         let textField = NSTextField(string: text)
@@ -336,13 +373,25 @@ struct SearchInput: View {
     @Binding var isFocused: Bool
     var onCommand: (() -> Void)? = nil
     var onEscape: (() -> Void)? = nil
+    var onUpArrow: (() -> Void)? = nil
+    var onDownArrow: (() -> Void)? = nil
+    var onReturn: (() -> Void)? = nil
+    
     var body: some View {
         HStack(spacing: 8) {
             Text(">")
                 .font(.system(size: 24, weight: .bold, design: .monospaced))
                 .foregroundColor(.gray)
-            FocusableTextField(text: $text, isFirstResponder: $isFocused, onCommand: onCommand, onEscape: onEscape)
-                .frame(height: 32)
+            FocusableTextField(
+                text: $text,
+                isFirstResponder: $isFocused,
+                onCommand: onCommand,
+                onEscape: onEscape,
+                onUpArrow: onUpArrow,
+                onDownArrow: onDownArrow,
+                onReturn: onReturn
+            )
+            .frame(height: 32)
         }
         .padding(.horizontal, 0)
         .background(Color.clear)
@@ -352,7 +401,7 @@ struct SearchInput: View {
 // MARK: - AppRow
 struct AppRow: View {
     let app: AppInfo
-    let isHighlighted: Bool
+    let isSelected: Bool
     var body: some View {
         HStack(spacing: 16) {
             Image(nsImage: app.icon)
@@ -366,7 +415,7 @@ struct AppRow: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
-        .background(isHighlighted ? Color(hex: "#181818") : Color.clear)
+        .background(isSelected ? Color(hex: "#181818") : Color.clear)
         .cornerRadius(8)
     }
 }
