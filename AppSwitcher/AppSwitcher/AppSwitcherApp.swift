@@ -101,18 +101,74 @@ class SwitcherWindowController: NSWindowController {
     init() {
         let contentView = ContentView()
         let hosting = NSHostingController(rootView: contentView)
-        let window = NSWindow(contentViewController: hosting)
+        let window = DraggableWindow(contentViewController: hosting)
         window.styleMask = [.borderless]
         window.isOpaque = false
         window.backgroundColor = .clear
         window.level = .floating
         window.hasShadow = true
         window.setFrameCentered(size: NSSize(width: 640, height: 408))
+        window.contentView?.wantsLayer = true
+        window.contentView?.layer?.masksToBounds = true
+        window.contentView?.layer?.cornerRadius = 12
         window.makeFirstResponder(hosting.view)
         super.init(window: window)
     }
     required init?(coder: NSCoder) { fatalError() }
 }
+
+class DraggableWindow: NSWindow {
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+    }
+    
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+    
+    private var isDragging = false
+    private var initialLocation: NSPoint?
+    
+    override func mouseDown(with event: NSEvent) {
+        // Get the location of the click in window coordinates
+        let location = event.locationInWindow
+        
+        // Convert to view coordinates
+        if let contentView = self.contentView {
+            let viewLocation = contentView.convert(location, from: nil)
+            
+            // Check if the click is on a text field or other interactive view
+            let hitView = contentView.hitTest(viewLocation)
+            if hitView is NSTextField || hitView is NSTextView {
+                // Let the text field handle the event
+                super.mouseDown(with: event)
+            } else {
+                // Start window dragging
+                isDragging = true
+                initialLocation = location
+                self.performDrag(with: event)
+            }
+        } else {
+            // Fallback to window dragging if no content view
+            self.performDrag(with: event)
+        }
+    }
+    
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
+        initialLocation = nil
+        super.mouseUp(with: event)
+    }
+    
+    override func keyDown(with event: NSEvent) {
+        // Forward key events to the first responder
+        if let firstResponder = self.firstResponder {
+            firstResponder.keyDown(with: event)
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+}
+
 extension NSWindow {
     func setFrameCentered(size: NSSize) {
         if let screen = NSScreen.main {

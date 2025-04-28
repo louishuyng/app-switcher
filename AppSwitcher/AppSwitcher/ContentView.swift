@@ -141,6 +141,7 @@ struct ContentView: View {
             .frame(width: 640, height: 408)
         }
         .frame(width: 640, height: 408)
+        .edgesIgnoringSafeArea(.all)
         .onAppear {
             apps = getInstalledApps()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { searchFieldFocused = true }
