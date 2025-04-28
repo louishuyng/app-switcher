@@ -120,7 +120,7 @@ struct ContentView: View {
                         .fill(Color(red: 0.13, green: 0.15, blue: 0.20, opacity: 0.92))
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
-                            SearchInput(text: $searchModel.searchText, isFocused: $searchModel.searchFieldFocused)
+                            SearchInput(text: $searchModel.searchText, isFocused: $searchModel.searchFieldFocused, onCommand: { showingSettings = true })
                                 .frame(height: 48)
                                 .padding(.top, 0)
                                 .padding(.leading, 16)
@@ -158,6 +158,11 @@ struct ContentView: View {
             SettingsView(selectedImage: $selectedImage, hotkey: $hotkey)
         }
         .onExitCommand(perform: closeSwitcher)
+        .onKeyDown { event in
+            if event.modifierFlags.contains(.command) && event.characters == "," {
+                showingSettings = true
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Button(action: { showingSettings = true }) {}
@@ -200,9 +205,20 @@ struct FocusableTextField: NSViewRepresentable {
                 parent.text = textField.stringValue
             }
         }
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            // Detect Cmd + ,
+            if let event = NSApp.currentEvent,
+               event.modifierFlags.contains(.command),
+               event.characters == "," {
+                parent.onCommand?()
+                return true
+            }
+            return false
+        }
     }
     @Binding var text: String
     @Binding var isFirstResponder: Bool
+    var onCommand: (() -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSTextField {
         let textField = NSTextField(string: text)
@@ -232,12 +248,13 @@ struct FocusableTextField: NSViewRepresentable {
 struct SearchInput: View {
     @Binding var text: String
     @Binding var isFocused: Bool
+    var onCommand: (() -> Void)? = nil
     var body: some View {
         HStack(spacing: 8) {
             Text(">")
                 .font(.system(size: 24, weight: .bold, design: .monospaced))
                 .foregroundColor(.gray)
-            FocusableTextField(text: $text, isFirstResponder: $isFocused)
+            FocusableTextField(text: $text, isFirstResponder: $isFocused, onCommand: onCommand)
                 .frame(height: 32)
         }
         .padding(.horizontal, 0)
