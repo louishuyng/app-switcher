@@ -120,7 +120,7 @@ struct ContentView: View {
                         .fill(Color(red: 0.13, green: 0.15, blue: 0.20, opacity: 0.92))
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
-                            SearchInput(text: $searchModel.searchText, isFocused: $searchModel.searchFieldFocused, onCommand: { showingSettings = true })
+                            SearchInput(text: $searchModel.searchText, isFocused: $searchModel.searchFieldFocused, onCommand: { showingSettings = true }, onEscape: closeSwitcher)
                                 .frame(height: 48)
                                 .padding(.top, 0)
                                 .padding(.leading, 16)
@@ -206,6 +206,11 @@ struct FocusableTextField: NSViewRepresentable {
             }
         }
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            // Handle Esc key
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onEscape?()
+                return true
+            }
             // Detect Cmd + ,
             if let event = NSApp.currentEvent,
                event.modifierFlags.contains(.command),
@@ -219,6 +224,7 @@ struct FocusableTextField: NSViewRepresentable {
     @Binding var text: String
     @Binding var isFirstResponder: Bool
     var onCommand: (() -> Void)? = nil
+    var onEscape: (() -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSTextField {
         let textField = NSTextField(string: text)
@@ -249,12 +255,13 @@ struct SearchInput: View {
     @Binding var text: String
     @Binding var isFocused: Bool
     var onCommand: (() -> Void)? = nil
+    var onEscape: (() -> Void)? = nil
     var body: some View {
         HStack(spacing: 8) {
             Text(">")
                 .font(.system(size: 24, weight: .bold, design: .monospaced))
                 .foregroundColor(.gray)
-            FocusableTextField(text: $text, isFirstResponder: $isFocused, onCommand: onCommand)
+            FocusableTextField(text: $text, isFirstResponder: $isFocused, onCommand: onCommand, onEscape: onEscape)
                 .frame(height: 32)
         }
         .padding(.horizontal, 0)
@@ -368,7 +375,12 @@ struct SettingsView: View {
                             if let data = try? JSONEncoder().encode(hotkey) {
                                 UserDefaults.standard.set(data, forKey: "hotkey")
                             }
-                            NotificationCenter.default.post(name: .hotkeyChanged, object: nil)
+                            // Update HotkeyManager immediately
+                            HotkeyManager.shared.setHotkey(hotkey) {
+                                if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
+                                    window.orderOut(nil)
+                                }
+                            }
                             pendingHotkey = nil
                         }
                     }
@@ -474,16 +486,18 @@ struct HotkeyPickerOverlay: NSViewRepresentable {
             stopListening()
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self = self else { return event }
-                let key = self.keyString(for: event)
-                let mods = self.modifierStrings(for: event)
-                let newHotkey = Hotkey(key: key, modifiers: mods)
-                if let conflict = self.checkConflict(hotkey: newHotkey) {
-                    self.parent.hotkeyConflict = conflict
-                } else {
-                    self.parent.pendingHotkey = newHotkey
-                    self.parent.hotkeyConflict = nil
+                DispatchQueue.main.async {
+                    let key = self.keyString(for: event)
+                    let mods = self.modifierStrings(for: event)
+                    let newHotkey = Hotkey(key: key, modifiers: mods)
+                    if let conflict = self.checkConflict(hotkey: newHotkey) {
+                        self.parent.hotkeyConflict = conflict
+                    } else {
+                        self.parent.pendingHotkey = newHotkey
+                        self.parent.hotkeyConflict = nil
+                    }
+                    self.parent.listening = false
                 }
-                self.parent.listening = false
                 return nil
             }
         }
@@ -517,19 +531,7 @@ struct HotkeyPickerOverlay: NSViewRepresentable {
             return mods
         }
         func checkConflict(hotkey: Hotkey) -> String? {
-            let systemShortcuts: [Hotkey] = [
-                Hotkey(key: "space", modifiers: ["command"]), // Spotlight
-                Hotkey(key: "space", modifiers: ["control"]), // Input source (default, but user can override)
-                Hotkey(key: "tab", modifiers: ["command"]), // App switcher
-                Hotkey(key: "f3", modifiers: []), // Mission Control
-                Hotkey(key: "f4", modifiers: []), // Launchpad
-                Hotkey(key: ",", modifiers: ["command"]), // Preferences
-            ]
-            for sys in systemShortcuts {
-                if sys == hotkey {
-                    return "This hotkey is reserved by macOS. Please choose another."
-                }
-            }
+            // TODO: Handle check conflict
             return nil
         }
     }
@@ -550,7 +552,9 @@ class HotkeyManager {
             let keyMatch = event.keyCode == self.keyCode(for: hotkey.key)
             let modsMatch = self.modifiersMatch(event: event, hotkey: hotkey)
             if keyMatch && modsMatch {
-                action()
+                DispatchQueue.main.async {
+                    action()
+                }
             }
         }
     }
@@ -558,6 +562,50 @@ class HotkeyManager {
         switch key.lowercased() {
         case "space": return 49
         case ",": return 43
+        case "a": return 0
+        case "b": return 11
+        case "c": return 8
+        case "d": return 2
+        case "e": return 14
+        case "f": return 3
+        case "g": return 5
+        case "h": return 4
+        case "i": return 34
+        case "j": return 38
+        case "k": return 40
+        case "l": return 37
+        case "m": return 46
+        case "n": return 45
+        case "o": return 31
+        case "p": return 35
+        case "q": return 12
+        case "r": return 15
+        case "s": return 1
+        case "t": return 17
+        case "u": return 32
+        case "v": return 9
+        case "w": return 13
+        case "x": return 7
+        case "y": return 16
+        case "z": return 6
+        case "0": return 29
+        case "1": return 18
+        case "2": return 19
+        case "3": return 20
+        case "4": return 21
+        case "5": return 23
+        case "6": return 22
+        case "7": return 26
+        case "8": return 28
+        case "9": return 25
+        case "return": return 36
+        case "tab": return 48
+        case "delete": return 51
+        case "escape": return 53
+        case "up": return 126
+        case "down": return 125
+        case "left": return 123
+        case "right": return 124
         default: return 0
         }
     }
