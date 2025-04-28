@@ -114,6 +114,17 @@ class AppNavigationManager: ObservableObject {
     }
 }
 
+// MARK: - AppDelegate
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Single instance behavior is now handled by AppSwitcherAppDelegate
+    }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        // Cleanup is handled by AppSwitcherAppDelegate
+    }
+}
+
 // MARK: - ContentView
 struct ContentView: View {
     @State private var selectedImage: NSImage? = UserDefaults.standard.data(forKey: "leftImage").flatMap { NSImage(data: $0) } ?? NSImage(named: "NSPhoto")
@@ -625,6 +636,8 @@ struct SettingsView: View {
                                     window.orderOut(nil)
                                 }
                             }
+                            // Post notification to reload hotkey in AppDelegate
+                            NotificationCenter.default.post(name: .hotkeyChanged, object: nil)
                             pendingHotkey = nil
                         }
                     }
@@ -933,6 +946,11 @@ class HotkeyManager {
         
         // Set up event tap for more reliable global hotkey detection
         setupEventTap()
+        
+        // Ensure the event tap is enabled
+        if let eventTap = eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+        }
     }
     
     private func handleKeyEvent(_ event: NSEvent) -> Bool {

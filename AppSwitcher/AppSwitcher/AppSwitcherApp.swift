@@ -9,18 +9,22 @@ import SwiftUI
 
 @main
 struct AppSwitcherApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @NSApplicationDelegateAdaptor(AppSwitcherAppDelegate.self) var appDelegate
+    
     var body: some Scene {
         WindowGroup {
-            EmptyView() // No main window
+            ContentView()
         }
-        .windowStyle(HiddenTitleBarWindowStyle())
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppSwitcherAppDelegate: NSObject, NSApplicationDelegate {
     var switcherWindowController: SwitcherWindowController?
     var settingsWindowController: NSWindowController?
+    private var isRunning = false
+    
     var hotkey: Hotkey = {
         if let data = UserDefaults.standard.data(forKey: "hotkey"), let hk = try? JSONDecoder().decode(Hotkey.self, from: data) {
             return hk
@@ -28,13 +32,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return .default
         }
     }()
+    
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Check if another instance is already running
+        if isRunning {
+            // If already running, activate the existing instance
+            if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            NSApp.terminate(nil)
+            return
+        }
+        
+        isRunning = true
         showSwitcher()
         setupHotkey()
         NotificationCenter.default.addObserver(forName: .hotkeyChanged, object: nil, queue: .main) { [weak self] _ in
             self?.reloadHotkey()
         }
     }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        isRunning = false
+    }
+    
     func showSettings() {
         let settingsView = SettingsRootView(onClose: {
             self.settingsWindowController?.close()
@@ -49,6 +71,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+    
     func showSwitcher() {
         if switcherWindowController == nil {
             switcherWindowController = SwitcherWindowController()
@@ -56,12 +79,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         switcherWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+    
     func setupHotkey() {
         HotkeyManager.shared.setHotkey(hotkey) { [weak self] in
             guard let self = self else { return }
             self.showSwitcher()
         }
     }
+    
     func reloadHotkey() {
         if let data = UserDefaults.standard.data(forKey: "hotkey"), let hk = try? JSONDecoder().decode(Hotkey.self, from: data) {
             self.hotkey = hk
