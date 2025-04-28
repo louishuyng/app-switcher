@@ -53,6 +53,15 @@ struct Hotkey: Codable, Equatable {
 class SearchModel: ObservableObject {
     @Published var searchText: String = ""
     @Published var searchFieldFocused: Bool = false
+    
+    init() {
+        // Add observer for clear search notification
+        NotificationCenter.default.addObserver(self, selector: #selector(clearSearch), name: .clearSearch, object: nil)
+    }
+    
+    @objc private func clearSearch() {
+        searchText = ""
+    }
 }
 
 // MARK: - AppNavigationManager
@@ -234,14 +243,9 @@ struct ContentView: View {
                     let mouseLocation = NSEvent.mouseLocation
                     let windowFrame = window.frame
                     
-                    // Only close if clicking on another app's window and neither settings nor image picker is active
+                    // Close if clicking outside the window and neither settings nor image picker is active
                     if !windowFrame.contains(mouseLocation) && !isImagePickerActive && !showingSettings {
-                        // Get the window under the mouse
-                        let windowNumber = NSWindow.windowNumber(at: mouseLocation, belowWindowWithWindowNumber: 0)
-                        // If there's a window under the mouse (not desktop), close the switcher
-                        if windowNumber != 0 {
-                            closeSwitcher()
-                        }
+                        closeSwitcher()
                     }
                 }
             }
@@ -330,6 +334,7 @@ struct ContentView: View {
         NSApplication.shared.windows.forEach { window in
             if window.styleMask.contains(.borderless) {
                 window.orderOut(nil)
+                HotkeyManager.shared.setSwitcherVisible(false)
             }
         }
     }
@@ -380,10 +385,21 @@ struct KeyEventHandlingView: NSViewRepresentable {
         override var acceptsFirstResponder: Bool { true }
         
         override func keyDown(with event: NSEvent) {
-            if onKeyDown?(event) == true {
-                return
+            // Check if this is the hotkey combination
+            let currentHotkey = HotkeyManager.shared.getCurrentHotkey()
+            let expectedModifiers = HotkeyManager.shared.expectedModifierFlags(for: currentHotkey ?? .default)
+            let modifiersMatch = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == expectedModifiers
+            let keyMatch = event.keyCode == HotkeyManager.shared.keyCode(for: currentHotkey?.key ?? "space")
+            
+            if modifiersMatch && keyMatch {
+                // If it's the hotkey, consume the event completely
+                if onKeyDown?(event) == true {
+                    return
+                }
+            } else {
+                // For all other keys, pass them through
+                super.keyDown(with: event)
             }
-            super.keyDown(with: event)
         }
         
         override func becomeFirstResponder() -> Bool {
@@ -885,6 +901,11 @@ class HotkeyManager {
     private var currentHotkey: Hotkey?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var isSwitcherVisible: Bool = false
+    
+    func getCurrentHotkey() -> Hotkey? {
+        return currentHotkey
+    }
     
     func setHotkey(_ hotkey: Hotkey, action: @escaping () -> Void) {
         // Remove existing monitor if any
@@ -914,35 +935,8 @@ class HotkeyManager {
         setupEventTap()
     }
     
-    private func setupEventTap() {
-        // Create event tap
-        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
-        eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: eventMask,
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                let hotkeyManager = Unmanaged<HotkeyManager>.fromOpaque(refcon!).takeUnretainedValue()
-                if let nsEvent = NSEvent(cgEvent: event) {
-                    hotkeyManager.handleKeyEvent(nsEvent)
-                }
-                return Unmanaged.passRetained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        )
-        
-        if let eventTap = eventTap {
-            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-            if let runLoopSource = runLoopSource {
-                CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-                CGEvent.tapEnable(tap: eventTap, enable: true)
-            }
-        }
-    }
-    
-    private func handleKeyEvent(_ event: NSEvent) {
-        guard let currentHotkey = self.currentHotkey else { return }
+    private func handleKeyEvent(_ event: NSEvent) -> Bool {
+        guard let currentHotkey = self.currentHotkey else { return false }
         
         // Get the exact modifier flags we expect
         let expectedModifiers = self.expectedModifierFlags(for: currentHotkey)
@@ -955,8 +949,58 @@ class HotkeyManager {
             let keyMatch = event.keyCode == self.keyCode(for: currentHotkey.key)
             if keyMatch {
                 DispatchQueue.main.async { [weak self] in
-                    self?.callback?()
+                    if let self = self {
+                        if self.isSwitcherVisible {
+                            // If switcher is visible, hide it
+                            if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
+                                window.orderOut(nil)
+                                self.isSwitcherVisible = false
+                            }
+                        } else {
+                            // If switcher is hidden, show it and clear search
+                            self.callback?()
+                            self.isSwitcherVisible = true
+                            // Clear the search input
+                            NotificationCenter.default.post(name: .clearSearch, object: nil)
+                        }
+                    }
                 }
+                return true
+            }
+        }
+        return false
+    }
+    
+    func setSwitcherVisible(_ visible: Bool) {
+        isSwitcherVisible = visible
+    }
+    
+    private func setupEventTap() {
+        // Create event tap
+        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                let hotkeyManager = Unmanaged<HotkeyManager>.fromOpaque(refcon!).takeUnretainedValue()
+                if let nsEvent = NSEvent(cgEvent: event) {
+                    if hotkeyManager.handleKeyEvent(nsEvent) {
+                        // If handleKeyEvent returns true, consume the event
+                        return nil
+                    }
+                }
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+        
+        if let eventTap = eventTap {
+            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+            if let runLoopSource = runLoopSource {
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+                CGEvent.tapEnable(tap: eventTap, enable: true)
             }
         }
     }
@@ -1127,6 +1171,7 @@ struct ImagePicker: NSViewControllerRepresentable {
 extension Notification.Name {
     static let hotkeyChanged = Notification.Name("hotkeyChanged")
     static let imageChanged = Notification.Name("imageChanged")
+    static let clearSearch = Notification.Name("clearSearch")
 }
 
 #Preview {
