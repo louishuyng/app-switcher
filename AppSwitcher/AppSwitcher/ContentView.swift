@@ -339,6 +339,7 @@ struct ContentView: View {
     @State private var keyDownMonitor: Any? = nil
     @State private var isImagePickerActive = false
     @State private var isWindowVisible = false
+    @State private var scrollProxy: ScrollViewProxy? = nil
     
     var filteredApps: [AppInfo] {
         if searchModel.searchText.isEmpty { return apps }
@@ -462,8 +463,8 @@ struct ContentView: View {
         }
         .onChange(of: isWindowVisible) { _, newValue in
             if newValue {
-                // Window became visible, invalidate cache
-                AppCache.shared.invalidateCache()
+                // Window became visible, reset state
+                resetState()
             }
         }
         .sheet(isPresented: $showingImagePicker) {
@@ -492,7 +493,7 @@ struct ContentView: View {
     }
     
     private var appList: some View {
-        ScrollViewReader { scrollProxy in
+        ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredApps) { app in
@@ -517,9 +518,12 @@ struct ContentView: View {
             .onChange(of: navigationManager.selectedAppId) { _, newValue in
                 if let id = newValue {
                     withAnimation(.none) {
-                        scrollProxy.scrollTo(id, anchor: .center)
+                        proxy.scrollTo(id, anchor: .center)
                     }
                 }
+            }
+            .onAppear {
+                scrollProxy = proxy
             }
         }
     }
@@ -532,7 +536,57 @@ struct ContentView: View {
         // Use bundle identifier directly instead of searching through /Applications
         if let url = workspace.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
             workspace.open(url)
+            // Invalidate cache and refresh the list
+            AppCache.shared.invalidateCache()
+            refreshApps()
             closeSwitcher()
+        }
+    }
+    
+    private func refreshApps() {
+        // Get fresh apps from cache
+        apps = AppCache.shared.getApps()
+        
+        // Sort apps by last used date, then running status, then activation count
+        apps.sort { (app1, app2) -> Bool in
+            // First, sort by last used date (most recent first)
+            if let date1 = app1.lastUsed, let date2 = app2.lastUsed {
+                return date1 > date2
+            } else if app1.lastUsed != nil {
+                return true
+            } else if app2.lastUsed != nil {
+                return false
+            }
+            
+            // Then by running status
+            if app1.isRunning && !app2.isRunning {
+                return true
+            } else if !app1.isRunning && app2.isRunning {
+                return false
+            }
+            
+            // Then by activation count
+            if app1.activationCount != app2.activationCount {
+                return app1.activationCount > app2.activationCount
+            }
+            
+            // Finally alphabetically
+            return app1.name.localizedCaseInsensitiveCompare(app2.name) == .orderedAscending
+        }
+        
+        // Update navigation manager with new apps
+        navigationManager.setApps(apps)
+        
+        // Reset selection state
+        navigationManager.selectedAppId = nil
+        
+        // Select first app if available
+        if let firstApp = apps.first {
+            navigationManager.selectApp(firstApp)
+            // Scroll to top
+            withAnimation(.none) {
+                scrollProxy?.scrollTo(firstApp.id, anchor: .top)
+            }
         }
     }
     
@@ -589,6 +643,71 @@ struct ContentView: View {
                 ImageCache.shared.getImage(for: "leftImage")
             }
             checkIfSelectedImageIsGIF()
+        }
+    }
+    
+    func resetState() {
+        // Invalidate cache and get fresh apps
+        AppCache.shared.invalidateCache()
+        apps = AppCache.shared.getApps()
+        // Reset navigation to first app
+        navigationManager.setApps(apps)
+        // Clear search
+        searchModel.searchText = ""
+        // Scroll to top
+        if let firstApp = apps.first {
+            withAnimation(.none) {
+                scrollProxy?.scrollTo(firstApp.id, anchor: .top)
+            }
+        }
+    }
+    
+    // Add public method to handle state updates
+    func updateState() {
+        // Invalidate cache and get fresh apps
+        AppCache.shared.invalidateCache()
+        apps = AppCache.shared.getApps()
+        
+        // Sort apps by last used date, then running status, then activation count
+        apps.sort { (app1, app2) -> Bool in
+            // First, sort by last used date (most recent first)
+            if let date1 = app1.lastUsed, let date2 = app2.lastUsed {
+                return date1 > date2
+            } else if app1.lastUsed != nil {
+                return true
+            } else if app2.lastUsed != nil {
+                return false
+            }
+            
+            // Then by running status
+            if app1.isRunning && !app2.isRunning {
+                return true
+            } else if !app1.isRunning && app2.isRunning {
+                return false
+            }
+            
+            // Then by activation count
+            if app1.activationCount != app2.activationCount {
+                return app1.activationCount > app2.activationCount
+            }
+            
+            // Finally alphabetically
+            return app1.name.localizedCaseInsensitiveCompare(app2.name) == .orderedAscending
+        }
+        
+        // Reset navigation to first app
+        navigationManager.setApps(apps)
+        // Clear search
+        searchModel.searchText = ""
+        // Reset selection to first app
+        if let firstApp = apps.first {
+            navigationManager.selectApp(firstApp)
+            // Scroll to top
+            withAnimation(.none) {
+                scrollProxy?.scrollTo(firstApp.id, anchor: .top)
+            }
+        } else {
+            navigationManager.selectedAppId = nil
         }
     }
 }
@@ -1292,10 +1411,14 @@ class HotkeyManager {
     private func showSwitcher() {
         guard let window = self.window else { return }
         isSwitcherVisible = true
-        // Invalidate cache before showing window
-        AppCache.shared.invalidateCache()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        
+        // Reset state and update app list
+        if let contentView = window.contentView as? NSHostingView<ContentView> {
+            contentView.rootView.updateState()
+        }
+        
         callback?()
         NotificationCenter.default.post(name: .clearSearch, object: nil)
     }

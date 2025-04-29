@@ -86,6 +86,10 @@ class AppSwitcherAppDelegate: NSObject, NSApplicationDelegate {
         }
         // Invalidate the app cache to ensure we get fresh data
         AppCache.shared.invalidateCache()
+        // Reset state and update app list
+        if let contentView = switcherWindowController?.window?.contentView as? NSHostingView<ContentView> {
+            contentView.rootView.updateState()
+        }
         switcherWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
