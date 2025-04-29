@@ -51,6 +51,7 @@ class AppUsageTracker {
     private func getAppSupportDirectory() -> URL? {
         let fileManager = FileManager.default
         guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            print("Failed to get Application Support directory")
             return nil
         }
         
@@ -60,7 +61,7 @@ class AppUsageTracker {
         // Create directory if it doesn't exist
         if !fileManager.fileExists(atPath: appDirectory.path) {
             do {
-                try fileManager.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+                try fileManager.createDirectory(at: appDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
             } catch {
                 print("Failed to create app support directory: \(error)")
                 return nil
@@ -71,7 +72,11 @@ class AppUsageTracker {
     }
     
     private func getDataFileURL() -> URL? {
-        return getAppSupportDirectory()?.appendingPathComponent(fileName)
+        guard let fileURL = getAppSupportDirectory()?.appendingPathComponent(fileName) else {
+            print("Failed to get data file URL")
+            return nil
+        }
+        return fileURL
     }
     
     private func loadData() -> [String: AppUsageData]? {
@@ -82,7 +87,8 @@ class AppUsageTracker {
             return try JSONDecoder().decode([String: AppUsageData].self, from: data)
         } catch {
             print("Failed to load app usage data: \(error)")
-            return nil
+            // Return empty dictionary instead of nil to prevent crashes
+            return [:]
         }
     }
     
@@ -91,7 +97,7 @@ class AppUsageTracker {
         
         do {
             let data = try JSONEncoder().encode(appUsage)
-            try data.write(to: fileURL, options: .atomic)
+            try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
         } catch {
             print("Failed to save app usage data: \(error)")
         }
@@ -456,7 +462,8 @@ struct ContentView: View {
         }
         .onChange(of: isWindowVisible) { _, newValue in
             if newValue {
-                // Window became visible
+                // Window became visible, invalidate cache
+                AppCache.shared.invalidateCache()
             }
         }
         .sheet(isPresented: $showingImagePicker) {
@@ -1285,6 +1292,8 @@ class HotkeyManager {
     private func showSwitcher() {
         guard let window = self.window else { return }
         isSwitcherVisible = true
+        // Invalidate cache before showing window
+        AppCache.shared.invalidateCache()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         callback?()

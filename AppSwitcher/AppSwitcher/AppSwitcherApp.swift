@@ -84,6 +84,8 @@ class AppSwitcherAppDelegate: NSObject, NSApplicationDelegate {
         if switcherWindowController == nil {
             switcherWindowController = SwitcherWindowController()
         }
+        // Invalidate the app cache to ensure we get fresh data
+        AppCache.shared.invalidateCache()
         switcherWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
