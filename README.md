@@ -18,8 +18,10 @@ A beautiful, Spotlight-like app switcher for macOS, built with SwiftUI.
 2. Product > Archive to create a release build.
 3. Export as a macOS app or DMG for easy installation.
 
-## Note:
-When set permission you need to quit the app and reopen then keymap can work perfectly
+## Configure
+- Press `Cmd + ,` to open the settings.
+- Change the hotkey to your preference.
+- Adjust the appearance image (support gif animated image)
 
 ---
 
