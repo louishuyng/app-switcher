@@ -2,6 +2,9 @@
 
 A beautiful, Spotlight-like app switcher for macOS, built with SwiftUI.
 
+<img width="1169" alt="image" src="https://github.com/user-attachments/assets/11db40b8-0db1-4011-826c-e11b74b8a04d" />
+
+
 ## Features
 - Fast app switching
 - Customizable hotkey
