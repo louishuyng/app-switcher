@@ -1,7 +1,5 @@
 # AppSwitcher
 
-This is a vibe coding project.
-
 A beautiful, Spotlight-like app switcher for macOS, built with SwiftUI.
 
 ## Features

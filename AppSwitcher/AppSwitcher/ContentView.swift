@@ -15,8 +15,6 @@ struct AppInfo: Identifiable {
     let id = UUID()
     let name: String
     let icon: NSImage
-    let description: String?
-    var isAnimated: Bool = false
     let bundleIdentifier: String
     var lastUsed: Date?
     var isRunning: Bool = false
@@ -124,6 +122,33 @@ class AppUsageTracker {
     }
 }
 
+// Add app cache
+class AppCache {
+    static let shared = AppCache()
+    private var cachedApps: [AppInfo]?
+    private var lastUpdateTime: Date?
+    private let updateInterval: TimeInterval = 60 // Update cache every minute
+    
+    func getApps() -> [AppInfo] {
+        let now = Date()
+        if let cached = cachedApps,
+           let lastUpdate = lastUpdateTime,
+           now.timeIntervalSince(lastUpdate) < updateInterval {
+            return cached
+        }
+        
+        let newApps = getInstalledApps()
+        cachedApps = newApps
+        lastUpdateTime = now
+        return newApps
+    }
+    
+    func invalidateCache() {
+        cachedApps = nil
+        lastUpdateTime = nil
+    }
+}
+
 func getInstalledApps() -> [AppInfo] {
     let appsURL = URL(fileURLWithPath: "/Applications")
     let fileManager = FileManager.default
@@ -159,7 +184,6 @@ func getInstalledApps() -> [AppInfo] {
         apps.append(AppInfo(
             name: name,
             icon: icon,
-            description: nil,
             bundleIdentifier: bundleId,
             lastUsed: usage.date,
             isRunning: isRunning,
@@ -312,7 +336,10 @@ struct ContentView: View {
     
     var filteredApps: [AppInfo] {
         if searchModel.searchText.isEmpty { return apps }
-        return apps.filter { $0.name.localizedCaseInsensitiveContains(searchModel.searchText) }
+        // Use more efficient search
+        return apps.filter { app in
+            app.name.localizedCaseInsensitiveContains(searchModel.searchText)
+        }
     }
     
     var body: some View {
@@ -373,7 +400,9 @@ struct ContentView: View {
         .frame(width: 640, height: 408)
         .edgesIgnoringSafeArea(.all)
         .onAppear {
-            apps = getInstalledApps()
+            // Use cached apps
+            apps = AppCache.shared.getApps()
+            loadSelectedImage()
             checkIfSelectedImageIsGIF()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 searchModel.searchFieldFocused = true
@@ -458,18 +487,31 @@ struct ContentView: View {
     private var appList: some View {
         ScrollViewReader { scrollProxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredApps) { app in
                         AppRow(app: app, isSelected: navigationManager.selectedAppId == app.id) {
                             openApp(app)
                         }
                         .id(app.id)
+                        // Add view recycling
+                        .onAppear {
+                            // Preload next few items
+                            if let index = filteredApps.firstIndex(where: { $0.id == app.id }),
+                               index < filteredApps.count - 5 {
+                                let nextApps = filteredApps[index+1...min(index+5, filteredApps.count-1)]
+                                for nextApp in nextApps {
+                                    _ = nextApp.icon // Preload icons
+                                }
+                            }
+                        }
                     }
                 }
             }
             .onChange(of: navigationManager.selectedAppId) { _, newValue in
                 if let id = newValue {
-                    withAnimation(.none) { scrollProxy.scrollTo(id, anchor: .center) }
+                    withAnimation(.none) {
+                        scrollProxy.scrollTo(id, anchor: .center)
+                    }
                 }
             }
         }
@@ -477,22 +519,13 @@ struct ContentView: View {
     
     func openApp(_ app: AppInfo) {
         let workspace = NSWorkspace.shared
-        let appsURL = URL(fileURLWithPath: "/Applications")
-        let fileManager = FileManager.default
-        guard let contents = try? fileManager.contentsOfDirectory(at: appsURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) else { return }
-        for url in contents where url.pathExtension == "app" {
-            let bundle = Bundle(url: url)
-            let bundleId = bundle?.bundleIdentifier ?? ""
-            let name = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ??
-                       bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String ??
-                       url.deletingPathExtension().lastPathComponent
-            if name == app.name {
-                // Update usage data before opening the app
-                AppUsageTracker.shared.updateUsage(for: bundleId)
-                workspace.open(url)
-                closeSwitcher()
-                break
-            }
+        // Update usage data before opening the app
+        AppUsageTracker.shared.updateUsage(for: app.bundleIdentifier)
+        
+        // Use bundle identifier directly instead of searching through /Applications
+        if let url = workspace.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
+            workspace.open(url)
+            closeSwitcher()
         }
     }
     
@@ -515,25 +548,40 @@ struct ContentView: View {
     }
     
     private func checkIfSelectedImageIsGIF() {
-        if let image = selectedImage {
-            // Check if the image data is a GIF
-            if let data = UserDefaults.standard.data(forKey: "leftImage"),
-               let source = CGImageSourceCreateWithData(data as CFData, nil),
-               let type = CGImageSourceGetType(source) as String?,
-               type == UTType.gif.identifier {
-                isSelectedImageGIF = true
-                return
-            }
-            
-            // Fallback check for multiple representations
-            if image.representations.count > 1 {
-                isSelectedImageGIF = true
-                return
-            }
-            
+        guard let image = selectedImage else {
             isSelectedImageGIF = false
-        } else {
-            isSelectedImageGIF = false
+            return
+        }
+        
+        // Check if the image has multiple representations (like a GIF)
+        if image.representations.count > 1 {
+            isSelectedImageGIF = true
+            return
+        }
+        
+        // Check if the image data is a GIF
+        if let data = UserDefaults.standard.data(forKey: "leftImage"),
+           let source = CGImageSourceCreateWithData(data as CFData, nil),
+           let type = CGImageSourceGetType(source) as String?,
+           type == UTType.gif.identifier {
+            isSelectedImageGIF = true
+            return
+        }
+        
+        isSelectedImageGIF = false
+    }
+    
+    private func loadSelectedImage() {
+        if let data = UserDefaults.standard.data(forKey: "leftImage") {
+            // Use cached image if available
+            if let cachedImage = ImageCache.shared.getImage(for: "leftImage") {
+                self.selectedImage = cachedImage
+            } else if let newImage = NSImage(data: data) {
+                self.selectedImage = newImage
+                // Cache the image
+                ImageCache.shared.getImage(for: "leftImage")
+            }
+            checkIfSelectedImageIsGIF()
         }
     }
 }
@@ -749,27 +797,35 @@ struct SearchInput: View {
 struct AppRow: View {
     let app: AppInfo
     let isSelected: Bool
-    let onTap: () -> Void
+    let action: () -> Void
     
     var body: some View {
-        HStack(spacing: 16) {
-            Image(nsImage: app.icon)
-                .resizable()
-                .frame(width: 28, height: 28)
-                .cornerRadius(6)
-            Text(app.name)
-                .font(.system(size: 18, weight: .regular, design: .rounded))
-                .foregroundColor(Color(nsColor: NSColor(named: "TextColor")!))
-            Spacer()
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Image(nsImage: app.icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 28, height: 28)
+                    .cornerRadius(6)
+                
+                Text(app.name)
+                    .font(.system(size: 18, weight: .regular, design: .rounded))
+                    .foregroundColor(Color(nsColor: NSColor(named: "TextColor")!))
+                
+                Spacer()
+                
+                if app.isRunning {
+                    Circle()
+                        .fill(Color(hex: "#92B580"))
+                        .frame(width: 8, height: 8)
+                }
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .background(isSelected ? Color(hex: "#181818") : Color.clear)
+            .cornerRadius(8)
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
-        .background(isSelected ? Color(hex: "#181818") : Color.clear)
-        .cornerRadius(8)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            onTap()
-        }
+        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -1627,4 +1683,25 @@ extension NSView {
 
 extension NSAppearance {
     static var isDarkModeKey: String { return "isDarkMode" }
+}
+
+// Add image cache
+class ImageCache {
+    static let shared = ImageCache()
+    private var cache: [String: NSImage] = [:]
+    
+    func getImage(for path: String) -> NSImage? {
+        if let cached = cache[path] {
+            return cached
+        }
+        if let image = NSImage(contentsOfFile: path) {
+            cache[path] = image
+            return image
+        }
+        return nil
+    }
+    
+    func clear() {
+        cache.removeAll()
+    }
 }
