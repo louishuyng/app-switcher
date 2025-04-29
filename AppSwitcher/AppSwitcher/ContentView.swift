@@ -17,6 +17,111 @@ struct AppInfo: Identifiable {
     let icon: NSImage
     let description: String?
     var isAnimated: Bool = false
+    let bundleIdentifier: String
+    var lastUsed: Date?
+    var isRunning: Bool = false
+    var activationCount: Int = 0
+}
+
+// Struct to represent app usage data
+struct AppUsageData: Codable {
+    let date: Date
+    let count: Int
+}
+
+// Global app usage tracker
+class AppUsageTracker {
+    static let shared = AppUsageTracker()
+    private var appUsage: [String: AppUsageData] = [:]
+    private let fileName = "app_usage.json"
+    
+    private init() {
+        // Load saved data
+        if let data = loadData() {
+            appUsage = data
+        }
+        
+        // Observe app activation events
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appActivated),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+    }
+    
+    private func getAppSupportDirectory() -> URL? {
+        let fileManager = FileManager.default
+        guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.appswitcher"
+        let appDirectory = appSupportURL.appendingPathComponent(bundleID)
+        
+        // Create directory if it doesn't exist
+        if !fileManager.fileExists(atPath: appDirectory.path) {
+            do {
+                try fileManager.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+            } catch {
+                print("Failed to create app support directory: \(error)")
+                return nil
+            }
+        }
+        
+        return appDirectory
+    }
+    
+    private func getDataFileURL() -> URL? {
+        return getAppSupportDirectory()?.appendingPathComponent(fileName)
+    }
+    
+    private func loadData() -> [String: AppUsageData]? {
+        guard let fileURL = getDataFileURL() else { return nil }
+        
+        do {
+            let data = try Data(contentsOf: fileURL)
+            return try JSONDecoder().decode([String: AppUsageData].self, from: data)
+        } catch {
+            print("Failed to load app usage data: \(error)")
+            return nil
+        }
+    }
+    
+    private func saveData() {
+        guard let fileURL = getDataFileURL() else { return }
+        
+        do {
+            let data = try JSONEncoder().encode(appUsage)
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            print("Failed to save app usage data: \(error)")
+        }
+    }
+    
+    @objc private func appActivated(_ notification: Notification) {
+        if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+           let bundleId = app.bundleIdentifier {
+            updateUsage(for: bundleId)
+        }
+    }
+    
+    func updateUsage(for bundleId: String) {
+        let now = Date()
+        if let existing = appUsage[bundleId] {
+            appUsage[bundleId] = AppUsageData(date: now, count: existing.count + 1)
+        } else {
+            appUsage[bundleId] = AppUsageData(date: now, count: 1)
+        }
+        saveData()
+    }
+    
+    func getUsage(for bundleId: String) -> (date: Date?, count: Int) {
+        if let usage = appUsage[bundleId] {
+            return (usage.date, usage.count)
+        }
+        return (nil, 0)
+    }
 }
 
 func getInstalledApps() -> [AppInfo] {
@@ -25,17 +130,69 @@ func getInstalledApps() -> [AppInfo] {
     guard let contents = try? fileManager.contentsOfDirectory(at: appsURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) else {
         return []
     }
+    
     var apps: [AppInfo] = []
+    let currentAppBundleId = Bundle.main.bundleIdentifier ?? ""
+    let runningApps = NSWorkspace.shared.runningApplications
+    
     for url in contents where url.pathExtension == "app" {
         let bundle = Bundle(url: url)
+        let bundleId = bundle?.bundleIdentifier ?? ""
+        
+        // Skip AppSwitcher itself
+        if bundleId == currentAppBundleId {
+            continue
+        }
+        
         let name = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ??
                    bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String ??
                    url.deletingPathExtension().lastPathComponent
         let icon = NSWorkspace.shared.icon(forFile: url.path)
         icon.size = NSSize(width: 28, height: 28)
-        apps.append(AppInfo(name: name, icon: icon, description: nil))
+        
+        // Check if the app is currently running
+        let isRunning = runningApps.contains { $0.bundleIdentifier == bundleId }
+        
+        // Get usage data from tracker
+        let usage = AppUsageTracker.shared.getUsage(for: bundleId)
+        
+        apps.append(AppInfo(
+            name: name,
+            icon: icon,
+            description: nil,
+            bundleIdentifier: bundleId,
+            lastUsed: usage.date,
+            isRunning: isRunning,
+            activationCount: usage.count
+        ))
     }
-    return apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    
+    // Sort by last used date, then running status, then activation count, then alphabetically
+    return apps.sorted { (app1, app2) -> Bool in
+        // First, sort by last used date (most recent first)
+        if let date1 = app1.lastUsed, let date2 = app2.lastUsed {
+            return date1 > date2
+        } else if app1.lastUsed != nil {
+            return true
+        } else if app2.lastUsed != nil {
+            return false
+        }
+        
+        // Then by running status
+        if app1.isRunning && !app2.isRunning {
+            return true
+        } else if !app1.isRunning && app2.isRunning {
+            return false
+        }
+        
+        // Then by activation count
+        if app1.activationCount != app2.activationCount {
+            return app1.activationCount > app2.activationCount
+        }
+        
+        // Finally alphabetically
+        return app1.name.localizedCaseInsensitiveCompare(app2.name) == .orderedAscending
+    }
 }
 
 // MARK: - Hotkey Model
@@ -78,6 +235,12 @@ class AppNavigationManager: ObservableObject {
         } else {
             selectedAppId = nil
             lastSelectedIndex = nil
+        }
+    }
+    
+    func selectApp(_ app: AppInfo) {
+        if let index = apps.firstIndex(where: { $0.id == app.id }) {
+            selectIndex(index)
         }
     }
     
@@ -181,7 +344,7 @@ struct ContentView: View {
                 
                 // Right: App List
                 ZStack {
-                    Color(red: 0.13, green: 0.15, blue: 0.20, opacity: 0.92)
+                    Color(red: 0.13, green: 0.15, blue: 0.20)
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
                             SearchInput(
@@ -209,29 +372,6 @@ struct ContentView: View {
         }
         .frame(width: 640, height: 408)
         .edgesIgnoringSafeArea(.all)
-        .background(
-            KeyEventHandlingView { event in
-                // Only handle arrow keys and return key, other keys will close the app
-                switch Int(event.keyCode) {
-                case kVK_UpArrow:
-                    navigationManager.moveUp()
-                    return true
-                case kVK_DownArrow:
-                    navigationManager.moveDown()
-                    return true
-                case kVK_Return:
-                    if let app = navigationManager.getSelectedApp() {
-                        openApp(app)
-                    }
-                    return true
-                default:
-                    closeSwitcher()
-                    return true
-                }
-            }
-            .environment(\.isSettingsVisible, showingSettings)
-            .environment(\.isImagePickerActive, isImagePickerActive)
-        )
         .onAppear {
             apps = getInstalledApps()
             checkIfSelectedImageIsGIF()
@@ -285,6 +425,11 @@ struct ContentView: View {
         .onChange(of: selectedImage) { _, _ in
             checkIfSelectedImageIsGIF()
         }
+        .onChange(of: isWindowVisible) { _, newValue in
+            if newValue {
+                // Window became visible
+            }
+        }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $selectedImage, isPresented: $showingImagePicker)
                 .onAppear {
@@ -315,8 +460,10 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredApps) { app in
-                        AppRow(app: app, isSelected: navigationManager.selectedAppId == app.id)
-                            .id(app.id)
+                        AppRow(app: app, isSelected: navigationManager.selectedAppId == app.id) {
+                            openApp(app)
+                        }
+                        .id(app.id)
                     }
                 }
             }
@@ -325,7 +472,6 @@ struct ContentView: View {
                     withAnimation(.none) { scrollProxy.scrollTo(id, anchor: .center) }
                 }
             }
-            .allowsHitTesting(false)
         }
     }
     
@@ -336,10 +482,13 @@ struct ContentView: View {
         guard let contents = try? fileManager.contentsOfDirectory(at: appsURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) else { return }
         for url in contents where url.pathExtension == "app" {
             let bundle = Bundle(url: url)
+            let bundleId = bundle?.bundleIdentifier ?? ""
             let name = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ??
                        bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String ??
                        url.deletingPathExtension().lastPathComponent
             if name == app.name {
+                // Update usage data before opening the app
+                AppUsageTracker.shared.updateUsage(for: bundleId)
                 workspace.open(url)
                 closeSwitcher()
                 break
@@ -545,6 +694,7 @@ struct FocusableTextField: NSViewRepresentable {
         textField.backgroundColor = .clear
         textField.font = NSFont.systemFont(ofSize: 24, weight: .medium)
         textField.focusRingType = .none
+        textField.textColor = NSColor(named: "TextColor")
         return textField
     }
     func updateNSView(_ nsView: NSTextField, context: Context) {
@@ -559,6 +709,7 @@ struct FocusableTextField: NSViewRepresentable {
                 editor.selectedRange = NSRange(location: length, length: 0)
             }
         }
+        nsView.textColor = NSColor(named: "TextColor")
     }
 }
 
@@ -576,7 +727,7 @@ struct SearchInput: View {
         HStack(spacing: 8) {
             Text(">")
                 .font(.system(size: 24, weight: .bold, design: .monospaced))
-                .foregroundColor(.gray)
+                .foregroundColor(Color(nsColor: NSColor(named: "TextColor")!))
             FocusableTextField(
                 text: $text,
                 isFirstResponder: $isFocused,
@@ -587,6 +738,7 @@ struct SearchInput: View {
                 onReturn: onReturn
             )
             .frame(height: 32)
+            .foregroundColor(Color(nsColor: NSColor(named: "TextColor")!))
         }
         .padding(.horizontal, 0)
         .background(Color.clear)
@@ -597,6 +749,8 @@ struct SearchInput: View {
 struct AppRow: View {
     let app: AppInfo
     let isSelected: Bool
+    let onTap: () -> Void
+    
     var body: some View {
         HStack(spacing: 16) {
             Image(nsImage: app.icon)
@@ -605,13 +759,17 @@ struct AppRow: View {
                 .cornerRadius(6)
             Text(app.name)
                 .font(.system(size: 18, weight: .regular, design: .rounded))
-                .foregroundColor(Color(hex: "#92898B"))
+                .foregroundColor(Color(nsColor: NSColor(named: "TextColor")!))
             Spacer()
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .background(isSelected ? Color(hex: "#181818") : Color.clear)
         .cornerRadius(8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onTap()
+        }
     }
 }
 
@@ -650,6 +808,23 @@ struct SettingsView: View {
     @State private var pendingHotkey: Hotkey? = nil
     @State private var accessibilityGranted = AXIsProcessTrusted()
     @State private var timer: Timer? = nil
+    @State private var showingPermissionAlert = false
+    @State private var previousAccessibilityState = AXIsProcessTrusted()
+    @Environment(\.dismiss) private var dismiss
+    
+    private func quitAndReopen() {
+        // Close all windows
+        NSApplication.shared.windows.forEach { $0.close() }
+        
+        // Get app path and schedule relaunch
+        let appPath = Bundle.main.bundlePath
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSWorkspace.shared.launchApplication(appPath)
+        }
+        
+        // Force quit the current instance
+        NSApplication.shared.terminate(nil)
+    }
     
     var body: some View {
         ScrollView {
@@ -712,6 +887,10 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Text("To set a new hotkey, click 'Set Hotkey' and press your desired combination. Avoid system-reserved shortcuts.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 8)
                 Divider()
                 HStack {
                     Text("Accessibility Permission:")
@@ -729,6 +908,14 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.top, 8)
+                .alert("Permission Required", isPresented: $showingPermissionAlert) {
+                    Button("Quit & Reopen") {
+                        quitAndReopen()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("To take effect, please quit and reopen the app.")
+                }
                 if !accessibilityGranted {
                     Button("Reveal in Finder") {
                         if let path = Bundle.main.bundlePath as String? {
@@ -749,9 +936,6 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
                     .padding(.bottom, 4)
                 }
-                Text("To set a new hotkey, click 'Set Hotkey' and press your desired combination. Avoid system-reserved shortcuts.")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
                 Spacer()
             }
             .padding(32)
@@ -760,10 +944,16 @@ struct SettingsView: View {
         .onAppear {
             HotkeyManager.shared.setSettingsVisible(true)
             accessibilityGranted = AXIsProcessTrusted()
+            previousAccessibilityState = accessibilityGranted
             timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
                 let granted = AXIsProcessTrusted()
                 if granted != accessibilityGranted {
                     accessibilityGranted = granted
+                    // Only show alert if permissions were just granted (changed from false to true)
+                    if granted && !previousAccessibilityState {
+                        showingPermissionAlert = true
+                    }
+                    previousAccessibilityState = granted
                 }
             }
         }
@@ -1411,4 +1601,30 @@ extension EnvironmentValues {
         get { self[IsImagePickerActiveKey.self] }
         set { self[IsImagePickerActiveKey.self] = newValue }
     }
+}
+
+// MARK: - NSAppearance Extension
+extension NSAppearance {
+    public var isDarkMode: Bool {
+        if #available(macOS 10.14, *) {
+            if self.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+                return true
+            } else {
+                return false
+            }
+        } else {
+            return false
+        }
+    }
+}
+
+// MARK: - NSView Extension
+extension NSView {
+    static var darkModeChangeNotification: Notification.Name { 
+        return .init(rawValue: "NSAppearance did change") 
+    }
+}
+
+extension NSAppearance {
+    static var isDarkModeKey: String { return "isDarkMode" }
 }
