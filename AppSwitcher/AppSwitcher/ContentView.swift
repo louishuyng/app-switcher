@@ -337,6 +337,7 @@ struct ContentView: View {
     @State private var isScrolling = false
     @State private var outsideClickMonitor: Any? = nil
     @State private var keyDownMonitor: Any? = nil
+    @State private var frontAppChangeMonitor: Any? = nil
     @State private var isImagePickerActive = false
     @State private var isWindowVisible = false
     @State private var scrollProxy: ScrollViewProxy? = nil
@@ -454,6 +455,18 @@ struct ContentView: View {
                     }
                 }
             }
+            
+            // Add monitor for front app changes
+            frontAppChangeMonitor = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [self] _ in
+                // Only close if neither settings nor image picker is active
+                if !isImagePickerActive && !showingSettings {
+                    closeSwitcher()
+                }
+            }
         }
         .onChange(of: searchModel.searchText) { _, _ in
             navigationManager.setApps(filteredApps)
@@ -488,6 +501,10 @@ struct ContentView: View {
             if let monitor = keyDownMonitor {
                 NSEvent.removeMonitor(monitor)
                 keyDownMonitor = nil
+            }
+            if let monitor = frontAppChangeMonitor {
+                NSWorkspace.shared.notificationCenter.removeObserver(monitor)
+                frontAppChangeMonitor = nil
             }
         }
     }
@@ -593,18 +610,13 @@ struct ContentView: View {
     func closeSwitcher() {
         // Use userInteractive QoS for UI updates
         DispatchQueue.main.async(qos: .userInteractive) {
-            NSApplication.shared.windows.forEach { window in
-                if window.styleMask.contains(.borderless) {
-                    if window.isVisible {
-                        window.orderOut(nil)
-                    }
-                    HotkeyManager.shared.setSwitcherVisible(false)
-                    self.isWindowVisible = false
-                    // Clear the search input when hiding
-                    NotificationCenter.default.post(name: .clearSearch, object: nil)
-                }
+            // Simply order out the window without any focus changes
+            if let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.borderless) }) {
+                window.orderOut(nil)
+                HotkeyManager.shared.setSwitcherVisible(false)
+                self.isWindowVisible = false
+                NotificationCenter.default.post(name: .clearSearch, object: nil)
             }
-            NSApp.hide(nil)
         }
     }
     
